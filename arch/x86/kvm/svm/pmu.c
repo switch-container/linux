@@ -51,7 +51,7 @@ static inline struct kvm_pmc *get_gp_pmc_amd(struct kvm_pmu *pmu, u32 msr,
 		 * MSRs (accessed via EVNTSEL) are even, CTRn MSRs are odd.
 		 */
 		idx = (unsigned int)((msr - MSR_F15H_PERF_CTL0) / 2);
-		if (!(msr & 0x1) != (type == PMU_TYPE_EVNTSEL))
+		if ((!(msr & 0x1)) != (type == PMU_TYPE_EVNTSEL))
 			return NULL;
 		break;
 	case MSR_K7_EVNTSEL0 ... MSR_K7_EVNTSEL3:
