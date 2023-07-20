@@ -1104,8 +1104,7 @@ static void mm_init_uprobes_state(struct mm_struct *mm)
 #endif
 }
 
-static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
-	struct user_namespace *user_ns)
+static struct mm_struct *mm_init_wo_task(struct mm_struct *mm) 
 {
 	mt_init_flags(&mm->mm_mt, MM_MT_FLAGS);
 	mt_set_external_lock(&mm->mm_mt, &mm->mmap_lock);
@@ -1123,7 +1122,6 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	spin_lock_init(&mm->arg_lock);
 	mm_init_cpumask(mm);
 	mm_init_aio(mm);
-	mm_init_owner(mm, p);
 	mm_pasid_init(mm);
 	RCU_INIT_POINTER(mm->exe_file, NULL);
 	mmu_notifier_subscriptions_init(mm);
@@ -1134,29 +1132,58 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm_init_uprobes_state(mm);
 	hugetlb_count_init(mm);
 
-	if (current->mm) {
-		mm->flags = current->mm->flags & MMF_INIT_MASK;
-		mm->def_flags = current->mm->def_flags & VM_INIT_DEF_MASK;
-	} else {
-		mm->flags = default_dump_filter;
-		mm->def_flags = 0;
-	}
+  mm->flags = default_dump_filter;
+  mm->def_flags = 0;
 
 	if (mm_alloc_pgd(mm))
 		goto fail_nopgd;
+
+	lru_gen_init_mm(mm);
+	return mm;
+
+fail_nopgd:
+	free_mm(mm);
+	return NULL;
+}
+
+static struct mm_struct* mm_init_task_part(struct mm_struct *mm,
+  struct task_struct *p, struct user_namespace *user_ns)
+{
+	mm_init_owner(mm, p);
+
+	if (current->mm) {
+		mm->flags = current->mm->flags & MMF_INIT_MASK;
+		mm->def_flags = current->mm->def_flags & VM_INIT_DEF_MASK;
+  }
 
 	if (init_new_context(p, mm))
 		goto fail_nocontext;
 
 	mm->user_ns = get_user_ns(user_ns);
-	lru_gen_init_mm(mm);
-	return mm;
+  return mm;
 
 fail_nocontext:
 	mm_free_pgd(mm);
-fail_nopgd:
-	free_mm(mm);
-	return NULL;
+  free_mm(mm);
+  return NULL;
+}
+
+static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
+	struct user_namespace *user_ns)
+{
+  return mm_init_wo_task(mm) == NULL ? NULL:
+    mm_init_task_part(mm, p, user_ns);
+}
+
+struct mm_struct *mm_alloc_wo_task(void)
+{
+  struct mm_struct *mm;
+  mm = allocate_mm();
+  if (!mm)
+    return NULL;
+
+  memset(mm, 0, sizeof(*mm));
+  return mm_init_wo_task(mm);
 }
 
 /*

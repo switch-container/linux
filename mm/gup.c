@@ -3281,6 +3281,22 @@ long pin_user_pages(unsigned long start, unsigned long nr_pages,
 }
 EXPORT_SYMBOL(pin_user_pages);
 
+long pin_user_pages_of(struct mm_struct *mm, unsigned long start, unsigned long nr_pages,
+		    unsigned int gup_flags, struct page **pages,
+		    struct vm_area_struct **vmas)
+{
+	/* FOLL_GET and FOLL_PIN are mutually exclusive. */
+	if (WARN_ON_ONCE(gup_flags & FOLL_GET))
+		return -EINVAL;
+
+	if (WARN_ON_ONCE(!pages))
+		return -EINVAL;
+
+	gup_flags |= FOLL_PIN;
+	return __gup_longterm_locked(mm, start, nr_pages,
+				     pages, vmas, gup_flags);
+}
+
 /*
  * pin_user_pages_unlocked() is the FOLL_PIN variant of
  * get_user_pages_unlocked(). Behavior is the same, except that this one sets
