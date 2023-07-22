@@ -1269,8 +1269,8 @@ unsigned long do_mmap_to(struct mm_struct *mm, struct file *file, unsigned long 
 		return -ENOMEM;
 
   // force MAP_FIXED_NOREPLACE
-  if (find_vma_intersection(mm, addr, addr + len))
-    return -EEXIST;
+	if (find_vma_intersection(mm, addr, addr + len))
+		return -EEXIST;
 
 	if (prot == PROT_EXEC) {
 		pkey = execute_only_pkey(mm);

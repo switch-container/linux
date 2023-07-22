@@ -1990,8 +1990,8 @@ int pin_user_pages_fast(unsigned long start, int nr_pages,
  * only used by pseudo_mm
  */
 long pin_user_pages_of(struct mm_struct *mm, unsigned long start, unsigned long nr_pages,
-		    unsigned int gup_flags, struct page **pages,
-		    struct vm_area_struct **vmas);
+			unsigned int gup_flags, struct page **pages,
+			struct vm_area_struct **vmas);
 
 int account_locked_vm(struct mm_struct *mm, unsigned long pages, bool inc);
 int __account_locked_vm(struct mm_struct *mm, unsigned long pages, bool inc,

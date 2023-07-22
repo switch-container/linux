@@ -1132,8 +1132,8 @@ static struct mm_struct *mm_init_wo_task(struct mm_struct *mm)
 	mm_init_uprobes_state(mm);
 	hugetlb_count_init(mm);
 
-  mm->flags = default_dump_filter;
-  mm->def_flags = 0;
+	mm->flags = default_dump_filter;
+	mm->def_flags = 0;
 
 	if (mm_alloc_pgd(mm))
 		goto fail_nopgd;
@@ -1160,19 +1160,19 @@ static struct mm_struct* mm_init_task_part(struct mm_struct *mm,
 		goto fail_nocontext;
 
 	mm->user_ns = get_user_ns(user_ns);
-  return mm;
+	return mm;
 
 fail_nocontext:
 	mm_free_pgd(mm);
-  free_mm(mm);
-  return NULL;
+	free_mm(mm);
+	return NULL;
 }
 
 static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	struct user_namespace *user_ns)
 {
-  return mm_init_wo_task(mm) == NULL ? NULL:
-    mm_init_task_part(mm, p, user_ns);
+	return mm_init_wo_task(mm) == NULL ? NULL:
+		mm_init_task_part(mm, p, user_ns);
 }
 
 struct mm_struct *mm_alloc_wo_task(void)

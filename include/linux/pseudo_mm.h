@@ -5,8 +5,8 @@
 #include <linux/xarray.h>
 
 struct pseudo_mm {
-  struct mm_struct *mm;
-  int id;
+	struct mm_struct *mm;
+	int id;
 };
 
 /*
@@ -24,8 +24,8 @@ void delete_pseudo_mm(int id);
  * The meaning of params is the same as mmap()
  */
 unsigned long pseudo_mm_add_anon_map(int id, unsigned long start,
-                                     unsigned long size, unsigned long prot,
-                                     unsigned long flags);
+				     unsigned long size, unsigned long prot,
+				     unsigned long flags);
 
 /*
  * pseudo_mm_fill_anon_map() - Fill the memory content of the vma
@@ -37,14 +37,21 @@ unsigned long pseudo_mm_add_anon_map(int id, unsigned long start,
  * @start)
  */
 unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
-                                      unsigned long size, struct file *content,
-                                      unsigned long offset);
+				      unsigned long size, struct file *content,
+				      off_t offset);
 
 /*
  * Add an file-backed memory mapping to this pseudo_mm.
  * TODO (huang-jl): how to design an API, what arguments this method need?
  */
 unsigned long pseudo_mm_add_file_map(int id, unsigned long start,
-                                     unsigned long size);
+				     unsigned long size);
+
+/*
+ * pseudo_mm_attach() - insert *all* memory mapping into an existing process's address space
+ * @pid: process id
+ * @id: pseudo_mm_id
+ */
+unsigned long pseudo_mm_attach(pid_t pid, int id);
 
 #endif
