@@ -22,11 +22,18 @@ struct pseudo_mm_fill_anon_param {
 	off_t offset;	// offset within the image file
 };
 
+struct pseudo_mm_attach_param {
+	pid_t pid;
+	int id;
+};
+
 #define PSEUDO_MM_IOC_CREATE _IOR(PSEUDO_MM_IOC_MAGIC, 0x00, int *)
 #define PSEUDO_MM_IOC_DELETE _IOW(PSEUDO_MM_IOC_MAGIC, 0x01, int *)
 #define PSEUDO_MM_IOC_ADD_ANON \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x02, struct pseudo_mm_add_anon_param *)
 #define PSEUDO_MM_IOC_FILL_ANON \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x03, struct pseudo_mm_fill_anon_param *)
+#define PSEUDO_MM_IOC_ATTACH \
+	_IOW(PSEUDO_MM_IOC_MAGIC, 0x04, struct pseudo_mm_attach_param *)
 
 #endif

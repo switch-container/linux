@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <linux/fs.h>
+#include <linux/init.h>
 
 #define stringify__(x) #x
 #define stringify_(x) stringify__(x)
@@ -68,11 +69,14 @@ static unsigned long fill_page_from_file(struct page *page, struct file *file,
 	return 0;
 }
 
-// TODO: call init function
-void __init pseudo_mm_cache_init(void)
+int __init pseudo_mm_cache_init(void)
 {
 	pseudo_mm_cachep = KMEM_CACHE(pseudo_mm, SLAB_PANIC | SLAB_ACCOUNT);
+	if (!pseudo_mm_cachep)
+		return -ENOMEM;
+	return 0;
 }
+postcore_initcall(pseudo_mm_cache_init);
 
 /*
  * create a pseudo_mm struct and initialize it

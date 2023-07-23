@@ -47,67 +47,61 @@ static int pseudo_mm_release(struct inode *inode, struct file *filp)
 // Return 0 when succeed
 static long _pseudo_mm_add_anon(void *__user args)
 {
-	struct pseudo_mm_add_anon_param *param;
+	struct pseudo_mm_add_anon_param param;
 	unsigned long err = 0;
 	unsigned long start, size;
 
-	param = kmalloc(sizeof(*param), GFP_KERNEL);
-	if (!param)
-		return -ENOMEM;
-	err = copy_from_user(param, args, sizeof(*param));
+	err = copy_from_user(&param, args, sizeof(param));
 	if (err)
-		goto free_param;
-	start = param->start;
-	if (param->end < param->start) {
-		err = -EINVAL;
-		goto free_param;
-	}
-	size = param->end - param->start;
+		return err;
+	start = param.start;
+	if (param.end < param.start)
+		return -EINVAL;
+	size = param.end - param.start;
 
-	err = pseudo_mm_add_anon_map(param->id, start, size, param->prot,
-				     param->flags);
-free_param:
-	kfree(param);
-
-	return err ? err : 0;
+	err = pseudo_mm_add_anon_map(param.id, start, size, param.prot,
+				     param.flags);
+	return err;
 }
 
 static long _pseudo_mm_fill_anon(void *__user args)
 {
-	struct pseudo_mm_fill_anon_param *param;
+	struct pseudo_mm_fill_anon_param param;
 	struct file *image;
 	unsigned long err = 0;
 	unsigned long start, size;
 
-	param = kmalloc(sizeof(*param), GFP_KERNEL);
-	if (!param)
-		return -ENOMEM;
-
-	err = copy_from_user(param, args, sizeof(*param));
+	err = copy_from_user(&param, args, sizeof(param));
 	if (err)
-		goto free_param;
-	start = param->start;
-	if (param->end < param->start) {
-		err = -EINVAL;
-		goto free_param;
-	}
-	size = param->end - param->start;
+		return err;
+	start = param.start;
+	if (param.end < param.start)
+		return -EINVAL;
+	size = param.end - param.start;
 
-	image = fget(param->fd);
+	image = fget(param.fd);
 	if (!image) {
-		pr_warn("pseudo_mm_misc driver recv invalid fd %d\n", param->fd);
-		err = -ENOENT;
-		goto free_param;
+		pr_warn("pseudo_mm_misc driver recv invalid fd %d\n", param.fd);
+		return -ENOENT;
 	}
-	err = pseudo_mm_fill_anon_map(param->id, start, size, image,
-				      param->offset);
+	err = pseudo_mm_fill_anon_map(param.id, start, size, image,
+				      param.offset);
 
 	fput(image);
 
-free_param:
-	kfree(param);
+	return err;
+}
 
-	return err ? err : 0;
+static long _pseudo_mm_attach(void *__user args)
+{
+	struct pseudo_mm_attach_param param;
+	unsigned long err;
+
+	err = copy_from_user(&param, args, sizeof(param));
+	if (err)
+		return err;
+	err = pseudo_mm_attach(param.pid, param.id);
+	return err;
 }
 
 static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
@@ -148,9 +142,14 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		if (err)
 			return err;
 		break;
+	case PSEUDO_MM_IOC_ATTACH:
+		err = _pseudo_mm_attach((void *)args);
+		if (err)
+			return err;
+		break;
 	default:
 		pr_warn("pseudo_mm_misc driver receive known cmd %u\n", cmd);
-		break;
+		return -EINVAL;
 	}
 
 	return 0;
