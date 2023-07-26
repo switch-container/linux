@@ -5,6 +5,5 @@ CFLAGS = -Wall \
 
 # TEST_PROGS := run_unprivileged_remount.sh run_nosymfollow.sh
 TEST_GEN_PROGS := anon-only
-TEST_FILES := one-page.img
 
 include ../lib.mk

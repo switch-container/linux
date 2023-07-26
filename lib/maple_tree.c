@@ -4408,7 +4408,7 @@ static inline void *mas_wr_store_entry(struct ma_wr_state *wr_mas)
  * Return: %NULL or the contents that already exists at the requested index
  * otherwise.  The maple state needs to be checked for error conditions.
  */
-static inline void *mas_insert(struct ma_state *mas, void *entry)
+void *mas_insert(struct ma_state *mas, void *entry)
 {
 	MA_WR_STATE(wr_mas, mas, entry);
 

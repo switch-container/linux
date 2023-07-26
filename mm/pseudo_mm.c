@@ -124,13 +124,13 @@ struct pseudo_mm *find_pseudo_mm(int id)
 
 	// invalid id
 	if (unlikely(id <= 0)) {
-		pr_warn("find pseudo_mm with id = %d not exist\n", id);
+		pr_warn("find pseudo_mm with invalid id = %d\n", id);
 		return NULL;
 	}
 
 	orig_id = id;
 	pseudo_mm = xa_find(&pseudo_mm_array, &orig_id, orig_id, XA_PRESENT);
-	BUG_ON(pseudo_mm && pseudo_mm->id != id);
+	WARN_ON(pseudo_mm && pseudo_mm->id != id);
 	return pseudo_mm;
 }
 
@@ -208,7 +208,16 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 		return -ENOENT;
 	}
 
-	if (!vma_is_anonymous(vma)) {
+	// TODO (huang-jl) how to distinguish file-backed mapping from
+	// anonymous shared mapping ?
+	//
+	// There are 2 cases where vma_is_anonymous() return false:
+	// 1. file-backed mapping (obviously)
+	// 2. anon and shared mapping (which points to a specical
+	// unlinked file /dev/zero)
+	//
+	// because of case 2, we do not use vma_is_anonymous() here
+	if (!vma_is_anonymous(vma) && !vma_is_shmem(vma)) {
 		pr_warn("vma at (#%lx - #%lx) is not anonymous\n", start,
 			start + size);
 		return -EINVAL;
@@ -361,12 +370,11 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 			i_mmap_unlock_write(mapping);
 		}
 
-		// Want to make sure that all pages are copy-on-write (specific for anonymous area),
-		// so simply mark it PRIVATE here and restore after copy_page_range.
-		if (vma_is_anonymous(tmp)) {
-			tmp_vma_shared = tmp->vm_flags | VM_SHARED;
-			tmp->vm_flags &= ~VM_SHARED;
-		}
+		// TODO (huang-jl) how about file-backed mapping ?
+		// Want to make sure that all pages are copy-on-write,
+		// so simply mark it PRIVATE here and restore after copy_page_range().
+		tmp->vm_flags &= ~VM_SHARED;
+		tmp_vma_shared = tmp->vm_flags | VM_SHARED;
 		/*
 		 * TODO (huang-jl) Copy/update hugetlb private vma information.
 		 */
@@ -375,18 +383,31 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 			hugetlb_dup_vma_private(tmp);
 		}
 
-		/* Link the vma into the MT */
-		mas.index = tmp->vm_start;
-		mas.last = tmp->vm_end - 1;
-		mas_store(&mas, tmp);
-		if (mas_is_err(&mas))
-			goto fail_nomem_mas_store;
+		/* Link the vma into the MT, and
+		 * make sure that there is **no overlapping**.
+		 */
+		mas_set_range(&mas, tmp->vm_start, tmp->vm_end - 1);
+		mas_insert(&mas, tmp);
+		if (mas_is_err(&mas)) {
+			unlink_anon_vmas(tmp);
+			mpol_put(vma_policy(tmp));
+			vm_area_free(tmp);
+			vm_unacct_memory(charge);
+			retval = xa_err(mas.node);
+			goto loop_out;
+		}
+
+		// mas.index = tmp->vm_start;
+		// mas.last = tmp->vm_end - 1;
+		// mas_store(&mas, tmp);
+		// if (mas_is_err(&mas))
+		// 	goto fail_nomem_mas_store;
 
 		mm->map_count++;
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(tmp, mpnt);
 
-		if (vma_is_anonymous(tmp) && tmp_vma_shared)
+		if (tmp_vma_shared)
 			tmp->vm_flags |= VM_SHARED;
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
@@ -428,8 +449,10 @@ unsigned long pseudo_mm_attach(pid_t pid, int id)
 	unsigned long err;
 
 	pseudo_mm = find_pseudo_mm(id);
-	if (!pseudo_mm)
+	if (!pseudo_mm) {
+		pr_warn("cannot find pseudo_mm with id %d\n", id);
 		return -ENOENT;
+	}
 
 	rcu_read_lock();
 	tsk = find_task_by_vpid(pid);

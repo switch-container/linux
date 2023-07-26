@@ -120,13 +120,13 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		pseudo_mm_id = create_pseudo_mm();
 		if (pseudo_mm_id < 0)
 			return pseudo_mm_id;
-		err = copy_to_user((int *)args, &pseudo_mm_id,
+		err = copy_to_user((void *)args, &pseudo_mm_id,
 				   sizeof(pseudo_mm_id));
 		if (err)
 			return err;
 		break;
 	case PSEUDO_MM_IOC_DELETE:
-		err = copy_from_user(&pseudo_mm_id, (int *)args,
+		err = copy_from_user(&pseudo_mm_id, (const void *)args,
 				     sizeof(pseudo_mm_id));
 		if (err)
 			return err;
