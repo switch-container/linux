@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <linux/fs.h>
+#include <linux/shmem_fs.h>
 #include <linux/init.h>
 
 #define stringify__(x) #x
@@ -100,6 +101,7 @@ int create_pseudo_mm(void)
 		goto drop_mm;
 	}
 	pseudo_mm->mm = mm;
+	refcount_set(&pseudo_mm->ref, 1);
 
 	// insert newly created pseudo into xarray
 	limit = XA_LIMIT(1, PSEUDO_MM_ID_MAX);
@@ -134,11 +136,16 @@ struct pseudo_mm *find_pseudo_mm(int id)
 	return pseudo_mm;
 }
 
-void delete_pseudo_mm(int id)
+void put_pseudo_mm_with_id(int id)
 {
 	struct pseudo_mm *pseudo_mm;
 	pseudo_mm = find_pseudo_mm(id);
 	if (!pseudo_mm)
+		return;
+
+	// pr_info("recv request to delete pseudo_mm %d\n", id);
+
+	if (!refcount_dec_and_test(&pseudo_mm->ref))
 		return;
 
 	if (pseudo_mm->mm)
@@ -147,6 +154,7 @@ void delete_pseudo_mm(int id)
 		xa_erase(&pseudo_mm_array, pseudo_mm->id);
 
 	kmem_cache_free(pseudo_mm_cachep, pseudo_mm);
+	// pr_info("request to delete pseudo_mm %d finish!\n", id);
 }
 
 unsigned long pseudo_mm_add_anon_map(int id, unsigned long start,
@@ -161,6 +169,10 @@ unsigned long pseudo_mm_add_anon_map(int id, unsigned long start,
 	if (!PAGE_ALIGNED(start) || !PAGE_ALIGNED(size) || size == 0) {
 		return -EINVAL;
 	}
+
+	if (!(flags & MAP_ANONYMOUS))
+		return -EINVAL;
+
 	pseudo_mm = find_pseudo_mm(id);
 	if (!pseudo_mm)
 		return -ENOENT;
@@ -230,6 +242,8 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 	if (!pages)
 		return -ENOMEM;
 
+	// TODO (huang-jl) try to pin these pages in memory (which is read-only).
+	// In case of swapping out or raising PF when access it.
 	nr_pin_pages =
 		pin_user_pages_of(mm, start, nr_pages, gup_flags, pages, NULL);
 	if (nr_pin_pages != nr_pages) {
@@ -240,6 +254,7 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 	for (i = 0; i < nr_pages; i++) {
 		ret = fill_page_from_file(pages[i], image,
 					  offset + i * PAGE_SIZE);
+		// pr_info("page %p mapcount = %d\n", pages[i], page_mapcount(pages[i]));
 		if (ret) {
 			ret = -EIO;
 			goto fill_page_failed;
@@ -260,6 +275,7 @@ fill_page_failed:
 
 /*
  * pseudo_dup_mmap() - insert mmap from pseudo_mm into mm
+ * @id: id of pseudo_mm
  * @pseudo_mm: The source to insert from
  * @tsk: Owner of the @mm
  * @mm: The destination to insert into
@@ -267,14 +283,15 @@ fill_page_failed:
  * Similar to dup_mmap() which in kernel/fork.c, but we are doing insert not dup.
  * Some steps will be skipped, while some additional step will be added.
  */
-static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
+static unsigned long pseudo_mm_attach_mmap(int id, struct pseudo_mm *pseudo_mm,
 					   struct task_struct *tsk,
 					   struct mm_struct *mm)
 {
 	struct mm_struct *oldmm = pseudo_mm->mm;
 	struct vm_area_struct *mpnt, *tmp;
 	int retval;
-	unsigned long charge = 0, tmp_vma_shared;
+	unsigned long addr;
+	unsigned long charge = 0, tmp_vm_flags;
 	LIST_HEAD(uf);
 	MA_STATE(old_mas, &oldmm->mm_mt, 0, 0);
 	MA_STATE(mas, &mm->mm_mt, 0, 0);
@@ -352,6 +369,27 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 			goto fail_nomem_anon_vma_fork;
 
 		tmp->vm_flags &= ~(VM_LOCKED | VM_LOCKONFAULT);
+		// we try to setup a new zero shmem file in page_fault_handler
+		if (vma_is_pseudo_anon_shared(mpnt)) {
+			tmp->pseudo_mm_flag |= id;
+			// setup a new sheme zero file when attach
+			tmp->vm_file = NULL;
+			retval = shmem_zero_setup(tmp);
+			if (retval)
+				goto fail_with_retval;
+			file = tmp->vm_file;
+			BUG_ON(!file);
+
+			i_mmap_lock_write(file->f_mapping);
+			mapping_allow_writable(file->f_mapping);
+			flush_dcache_mmap_lock(file->f_mapping);
+			vma_interval_tree_insert(tmp, &file->f_mapping->i_mmap);
+			flush_dcache_mmap_unlock(file->f_mapping);
+			i_mmap_unlock_write(file->f_mapping);
+			mapping_unmap_writable(file->f_mapping);
+			uprobe_mmap(tmp); /* is this needed ? */
+			goto skip_normal_file;
+		}
 
 		// TODO (huang-jl) check file-related logic
 		file = tmp->vm_file;
@@ -370,11 +408,17 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 			i_mmap_unlock_write(mapping);
 		}
 
+skip_normal_file:
 		// TODO (huang-jl) how about file-backed mapping ?
 		// Want to make sure that all pages are copy-on-write,
 		// so simply mark it PRIVATE here and restore after copy_page_range().
+		// The pte will be write-protected.
+		WARN(tmp->vm_flags != mpnt->vm_flags,
+		     "tmp and mpnt flag corrupt: %lx vs %lx\n", tmp->vm_flags,
+		     mpnt->vm_flags);
+		tmp_vm_flags = tmp->vm_flags;
 		tmp->vm_flags &= ~VM_SHARED;
-		tmp_vma_shared = tmp->vm_flags | VM_SHARED;
+		mpnt->vm_flags &= ~VM_SHARED;
 		/*
 		 * TODO (huang-jl) Copy/update hugetlb private vma information.
 		 */
@@ -389,12 +433,8 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 		mas_set_range(&mas, tmp->vm_start, tmp->vm_end - 1);
 		mas_insert(&mas, tmp);
 		if (mas_is_err(&mas)) {
-			unlink_anon_vmas(tmp);
-			mpol_put(vma_policy(tmp));
-			vm_area_free(tmp);
-			vm_unacct_memory(charge);
 			retval = xa_err(mas.node);
-			goto loop_out;
+			goto fail_with_retval;
 		}
 
 		// mas.index = tmp->vm_start;
@@ -404,17 +444,48 @@ static unsigned long pseudo_mm_attach_mmap(struct pseudo_mm *pseudo_mm,
 		// 	goto fail_nomem_mas_store;
 
 		mm->map_count++;
+		// TODO (huang-jl) anonymous shared vma's anon_vma is NULL
+		// so it will not copy pages when copy_page_range().
+		// See vma_needs_copy() for more detail.
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(tmp, mpnt);
 
-		if (tmp_vma_shared)
-			tmp->vm_flags |= VM_SHARED;
+		// TODO (huang-jl) Debug: check for page table entry
+		if (vma_is_pseudo_anon_shared(tmp)) {
+			addr = tmp->vm_start;
+			while (addr < tmp->vm_end) {
+				pgd_t *pgd = pgd_offset(mm, addr);
+				WARN(pgd_none(*pgd), "va #%lx pgd is none",
+				     addr);
+				p4d_t *p4d = p4d_offset(pgd, addr);
+				WARN(p4d_none(*p4d), "va #%lx p4d is none",
+				     addr);
+				pud_t *pud = pud_offset(p4d, addr);
+				WARN(pud_none(*pud), "va #%lx pud is none",
+				     addr);
+				pmd_t *pmd = pmd_offset(pud, addr);
+				WARN(pmd_none(*pmd), "va #%lx pmd is none",
+				     addr);
+				pte_t *pte = pte_offset_kernel(pmd, addr);
+				WARN(pte_none(*pte), "va #%lx pte is none",
+				     addr);
+				WARN(pte_write(*pte), "va #%lx pte is writable",
+				     addr);
+				addr += PAGE_SIZE;
+			}
+		}
+
+		tmp->vm_flags = tmp_vm_flags;
+		mpnt->vm_flags = tmp_vm_flags;
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
 
 		if (retval)
 			goto loop_out;
+
+		if (vma_is_pseudo_anon_shared(tmp))
+			refcount_inc(&pseudo_mm->ref);
 	}
 	/* a new mm has just been created */
 	retval = arch_dup_mmap(oldmm, mm);
@@ -429,14 +500,19 @@ fail_uprobe_end:
 	uprobe_end_dup_mmap();
 	return retval;
 
-fail_nomem_mas_store:
-	unlink_anon_vmas(tmp);
 fail_nomem_anon_vma_fork:
 	mpol_put(vma_policy(tmp));
 fail_nomem_policy:
 	vm_area_free(tmp);
 fail_nomem:
 	retval = -ENOMEM;
+	vm_unacct_memory(charge);
+	goto loop_out;
+
+fail_with_retval:
+	unlink_anon_vmas(tmp);
+	mpol_put(vma_policy(tmp));
+	vm_area_free(tmp);
 	vm_unacct_memory(charge);
 	goto loop_out;
 }
@@ -469,7 +545,7 @@ unsigned long pseudo_mm_attach(pid_t pid, int id)
 		return 0;
 	}
 
-	err = pseudo_mm_attach_mmap(pseudo_mm, tsk, tsk_mm);
+	err = pseudo_mm_attach_mmap(id, pseudo_mm, tsk, tsk_mm);
 	if (err) {
 		pr_warn("attach pseudo_mm (id = %d)'s mmap to pid %d failed!\n",
 			id, pid);
@@ -480,4 +556,9 @@ put_tsk_mm:
 	mmput(tsk_mm);
 
 	return err ? err : 0;
+}
+
+bool vma_is_pseudo_anon_shared(struct vm_area_struct *vma)
+{
+	return !!(vma->pseudo_mm_flag & PSEUDO_MM_VMA_ANON_SHARED);
 }

@@ -7,6 +7,8 @@
 struct pseudo_mm {
 	struct mm_struct *mm;
 	int id;
+	// refcount used to prevent anonymous shared memory from delete
+	refcount_t ref;
 };
 
 /*
@@ -16,7 +18,7 @@ struct pseudo_mm {
  */
 int create_pseudo_mm(void);
 struct pseudo_mm *find_pseudo_mm(int id);
-void delete_pseudo_mm(int id);
+void put_pseudo_mm_with_id(int id);
 /*
  * Add an anonymous memory mapping to this pseudo_mm.
  * This will not fill content of the physical page
@@ -53,5 +55,4 @@ unsigned long pseudo_mm_add_file_map(int id, unsigned long start,
  * @id: pseudo_mm_id
  */
 unsigned long pseudo_mm_attach(pid_t pid, int id);
-
 #endif

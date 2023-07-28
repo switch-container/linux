@@ -130,7 +130,7 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 				     sizeof(pseudo_mm_id));
 		if (err)
 			return err;
-		delete_pseudo_mm(pseudo_mm_id);
+		put_pseudo_mm_with_id(pseudo_mm_id);
 		break;
 	case PSEUDO_MM_IOC_ADD_ANON:
 		err = _pseudo_mm_add_anon((void *)args);

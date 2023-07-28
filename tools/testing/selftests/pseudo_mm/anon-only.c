@@ -94,8 +94,11 @@ int check_anon_page_content(void *start)
 	char *iter;
 	for (i = 0; i < PAGE_SIZE; i++) {
 		iter = (char *)(start + i);
-		if (*iter != ((i % 20) + 'a'))
+		if (*iter != ((i % 20) + 'a')) {
+			printf("check_anon_page_content: expect %d find %d\n",
+			       (i % 20) + 'a', *iter);
 			return -1;
+		}
 	}
 	return 0;
 }
@@ -237,9 +240,97 @@ TEST_F(single_page_anon, attach_to_conflict_addr)
 	}
 }
 
+/*
+ * This test wants to make sure:
+ * 1. one process create a pseudo_mm and exit
+ * 2. another process can still attach this pseudo_mm
+ *
+ * So that the lifetime of pseudo_mm is not bind with process.
+ */
+FIXTURE(pseudo_mm_lifetime_simple)
+{
+	int fd;
+	unsigned long start, end;
+};
+
+FIXTURE_SETUP(pseudo_mm_lifetime_simple)
+{
+	self->start = 0xdead0UL << PAGE_SHIFT;
+	self->end = 0xdead1UL << PAGE_SHIFT;
+	self->fd = open(DEVICE_PATH, O_RDWR);
+	ASSERT_GT(self->fd, 0);
+}
+
+FIXTURE_TEARDOWN(pseudo_mm_lifetime_simple)
+{
+	close(self->fd);
+}
+
+FIXTURE_VARIANT(pseudo_mm_lifetime_simple)
+{
+	unsigned long flags;
+};
+
+FIXTURE_VARIANT_ADD(pseudo_mm_lifetime_simple, private){
+	.flags = MAP_ANONYMOUS | MAP_PRIVATE,
+};
+
+FIXTURE_VARIANT_ADD(pseudo_mm_lifetime_simple, shared){
+	.flags = MAP_ANONYMOUS | MAP_SHARED,
+};
+
+TEST_F(pseudo_mm_lifetime_simple, step1)
+{
+	int ret, pseudo_mm_id, img_fd, i;
+	char ch;
+
+	img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	ASSERT_GT(img_fd, 0);
+	for (i = 0; i < PAGE_SIZE; i++) {
+		ch = (i % 20) + 'a';
+		ret = pwrite(img_fd, (void *)(&ch), 1, i);
+		ASSERT_EQ(ret, 1);
+	}
+	fsync(img_fd);
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE, (void *)(&pseudo_mm_id));
+	ASSERT_EQ(ret, 0);
+	ASSERT_EQ(pseudo_mm_id, 1);
+
+	ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
+				       self->start, self->end, variant->flags);
+	ASSERT_EQ(ret, 0);
+	close(img_fd);
+}
+
+TEST_F(pseudo_mm_lifetime_simple, step2)
+{
+	int ret, pseudo_mm_id = 1;
+	pid_t pid;
+	struct pseudo_mm_attach_param attach_param;
+
+	pid = getpid();
+	attach_param.id = pseudo_mm_id;
+	attach_param.pid = pid;
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
+	ASSERT_EQ(ret, 0);
+
+	ret = check_anon_page_content((void *)self->start);
+	ASSERT_EQ(ret, 0);
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_DELETE, (void *)(&pseudo_mm_id));
+	ASSERT_EQ(ret, 0);
+}
+
+/*
+ * This test will test both private and shared anonymous memory:
+ * 1. create a pseudo_mm.
+ * 2. two process (named P1 and P2) will both attach to it.
+ * 3. P1 try to modify the content in pseudo_mm's virtual address.
+ * 4. P2 should not P1's modification.
+ */
 FIXTURE(single_page_anon_multi_attach)
 {
-	int pseudo_mm_id, img_fd, fd;
+	int fd;
+	unsigned long start, end;
 };
 
 FIXTURE_VARIANT(single_page_anon_multi_attach)
@@ -257,11 +348,9 @@ FIXTURE_VARIANT_ADD(single_page_anon_multi_attach, shared){
 
 FIXTURE_SETUP(single_page_anon_multi_attach)
 {
-	// 1. create a pseudo_mm
-	// 2. add an one-page anon mapping to pseudo_mm
-	// 3. fill the memory content of this one-page mapping with a image file
-	int ret, i;
-	char ch;
+	// create a pseudo_mm
+	self->start = 0xdead0UL << PAGE_SHIFT;
+	self->end = 0xdead1UL << PAGE_SHIFT;
 
 	self->fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(self->fd, 0)
@@ -269,43 +358,36 @@ FIXTURE_SETUP(single_page_anon_multi_attach)
 		TH_LOG("open misc driver " DEVICE_PATH " failed: %d!",
 		       self->fd);
 	}
-
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
-		    (void *)(&self->pseudo_mm_id));
-	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0)
-	{
-		TH_LOG("create paseudo_mm failed: ret %d pseudo_mm_id %d!", ret,
-		       self->pseudo_mm_id);
-	}
-
-	TH_LOG("succeed to create a pseudo_mm (id = %d).", self->pseudo_mm_id);
-
-	self->img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-	ASSERT_GT(self->img_fd, 0)
-	{
-		TH_LOG("open image file " IMAGE_FILE " failed: %d!",
-		       self->img_fd);
-	}
-	for (i = 0; i < PAGE_SIZE; i++) {
-		ch = (i % 20) + 'a';
-		ret = pwrite(self->img_fd, (void *)(&ch), 1, i);
-		ASSERT_EQ(ret, 1);
-	}
-	fsync(self->img_fd);
 }
 
 FIXTURE_TEARDOWN(single_page_anon_multi_attach)
 {
-	int ret;
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_DELETE,
-		    (void *)(&self->pseudo_mm_id));
-	EXPECT_EQ(ret, 0)
-	{
-		TH_LOG("delete pseudo_mm %d failed: %d!", self->pseudo_mm_id,
-		       ret);
-	}
 	close(self->fd);
-	close(self->img_fd);
+}
+
+TEST_F(single_page_anon_multi_attach, prepare)
+{
+	int pseudo_mm_id, img_fd, ret, i;
+	char ch;
+
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
+				(void *)(&pseudo_mm_id));
+	ASSERT_TRUE(ret == 0 && pseudo_mm_id > 0);
+
+	TH_LOG("succeed to create a pseudo_mm (id = %d).", pseudo_mm_id);
+
+	img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	ASSERT_GT(img_fd, 0);
+	for (i = 0; i < PAGE_SIZE; i++) {
+		ch = (i % 20) + 'a';
+		ret = pwrite(img_fd, (void *)(&ch), 1, i);
+		ASSERT_EQ(ret, 1);
+	}
+	fsync(img_fd);
+
+	ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
+				       self->start, self->end, variant->flags);
+	close(img_fd);
 }
 
 TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
@@ -313,31 +395,19 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 	// ctp means child(w)-to-parent(r) pipe
 	// ptc means parent(r)-to-child(w) pipe
 	int ret, i, ctp[2], ptc[2];
+	int pseudo_mm_id = 1;
 	char buf, *iter;
 	pid_t pid, curr_pid;
-	const unsigned long start = 0xdead0UL << PAGE_SHIFT;
-	const unsigned long end = start + PAGE_SIZE;
 	struct pseudo_mm_attach_param attach_param;
-
-	TH_LOG("try to add and fill anon map #%lx - #%lx", start, end);
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, start, end,
-				       variant->flags);
-	ASSERT_EQ(ret, 0)
-	{
-		TH_LOG("add and fill anon map (#%lx - #%lx) failed: %d", start,
-		       end, ret);
-	}
 
 	ASSERT_EQ(pipe(ctp), 0);
 	ASSERT_EQ(pipe(ptc), 0);
 	pid = fork();
 	ASSERT_GE(pid, 0);
 	curr_pid = getpid();
-
-	attach_param.id = self->pseudo_mm_id;
+	// both child and parent need attach
+	attach_param.id = pseudo_mm_id;
 	attach_param.pid = curr_pid;
-	ASSERT_NE(fcntl(self->fd, F_GETFD), -1);
 	ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
 	ASSERT_EQ(ret, 0)
 	{
@@ -345,47 +415,56 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 		       curr_pid, errno);
 	}
 
-	ret = check_anon_page_content((void *)start);
+	ret = check_anon_page_content((void *)self->start);
 	ASSERT_EQ(ret, 0)
 	{
 		TH_LOG("process %d check anon page content at #%lx failed",
-		       curr_pid, start);
+		       curr_pid, self->start);
 	}
 
 	TH_LOG("process %d succeed to attach pseudo_mm to current process and check its content.",
 	       curr_pid);
 
 	if (pid == 0) {
-		// child
+		// child should not notice modification
 		close(ptc[1]);
 		close(ctp[0]);
-		ASSERT_EQ(write(ctp[1], &buf, 1), 1); // notify parent to start modification
-		ASSERT_EQ(read(ptc[0], &buf, 1), 1);	// wait for parent's modification
+		ASSERT_EQ(write(ctp[1], &buf, 1),
+			  1); // notify parent to start modification
+		ASSERT_EQ(read(ptc[0], &buf, 1),
+			  1); // wait for parent's modification
 		close(ptc[0]);
 		// make sure child does not see parent's modification
-		ret = check_anon_page_content((void *)start);
-		buf = ret == 0 ? 0 : 'e';	// 0 means succeed, 'e' means error
+		ret = check_anon_page_content((void *)self->start);
+		TH_LOG("child (%d) finish check anon page after parent written!",
+		       curr_pid);
+		buf = ret == 0 ? 0 : 'e'; // 0 means succeed, 'e' means error
 		ASSERT_EQ(write(ctp[1], &buf, 1), 1);
 		close(ctp[1]);
 		exit(EXIT_SUCCESS);
 	} else {
-		// parent
-		ASSERT_EQ(read(ctp[0], &buf, 1), 1);	// wait for child's preparation
+		// parent modify memory content
+		ASSERT_EQ(read(ctp[0], &buf, 1),
+			  1); // wait for child's preparation
 		close(ptc[0]);
 		close(ctp[1]);
 		for (i = 0; i < PAGE_SIZE; i++) {
-			iter = (char *)(start + i);
+			iter = (char *)(self->start + i);
 			*iter = 'X';
 		}
+		TH_LOG("parent (%d) finish write anon page!", curr_pid);
 		ASSERT_EQ(write(ptc[1], &buf, 1), 1);
 		close(ptc[1]);
 		// parent read from pipe when child succeed;
 		ASSERT_EQ(read(ctp[0], &buf, 1), 1);
 		close(ctp[0]);
-		ASSERT_EQ(buf, 0)
-		{
-			TH_LOG("child failed to check content after parent's modification!");
-		}
+		ASSERT_EQ(buf, 0);
+	}
+
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_DELETE, (void *)(&pseudo_mm_id));
+	EXPECT_EQ(ret, 0)
+	{
+		TH_LOG("delete pseudo_mm %d failed: %d!", pseudo_mm_id, ret);
 	}
 }
 

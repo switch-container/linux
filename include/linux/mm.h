@@ -424,6 +424,9 @@ extern unsigned int kobjsize(const void *objp);
 #endif
 #define VM_FLAGS_CLEAR	(ARCH_VM_PKEY_FLAGS | VM_ARCH_CLEAR)
 
+/* The low 32-bit of vma->pseudo_mm_flag is pseudo_mm id */
+#define PSEUDO_MM_VMA_ANON_SHARED	BIT(32)
+
 /*
  * mapping from the currently active vm_flags protection bits (the
  * low four bits) to a page protection mask..
@@ -699,8 +702,13 @@ static inline unsigned long vma_iter_addr(struct vma_iterator *vmi)
  * paths in userfault.
  */
 bool vma_is_shmem(struct vm_area_struct *vma);
+bool vma_is_pseudo_anon_shared(struct vm_area_struct *vma);
 #else
 static inline bool vma_is_shmem(struct vm_area_struct *vma) { return false; }
+static inline bool vma_is_pseudo_anon_shared(struct vm_area_struct *vma)
+{
+	return false;
+}
 #endif
 
 int vma_is_stack_for_current(struct vm_area_struct *vma);
@@ -2753,7 +2761,7 @@ extern unsigned long get_unmapped_area(struct file *, unsigned long, unsigned lo
 
 extern unsigned long mmap_region_to(struct mm_struct *mm, struct file *file, unsigned long addr,
 	unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
-	struct list_head *uf);
+	struct list_head *uf, unsigned long pseudo_mm_flag);
 extern unsigned long mmap_region(struct file *file, unsigned long addr,
 	unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
 	struct list_head *uf);

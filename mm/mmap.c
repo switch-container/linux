@@ -52,6 +52,8 @@
 #include <asm/tlb.h>
 #include <asm/mmu_context.h>
 
+#include <linux/pseudo_mm.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
 
@@ -140,6 +142,9 @@ static void remove_vma(struct vm_area_struct *vma)
 		vma->vm_ops->close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
+	if (vma_is_pseudo_anon_shared(vma)) {
+		put_pseudo_mm_with_id(lower_32_bits(vma->pseudo_mm_flag));
+	}
 	mpol_put(vma_policy(vma));
 	vm_area_free(vma);
 }
@@ -1248,6 +1253,7 @@ unsigned long do_mmap_to(struct mm_struct *mm, struct file *file, unsigned long 
 			struct list_head *uf)
 {
 	vm_flags_t vm_flags;
+	unsigned long pseudo_mm_flags;
 	int pkey = 0;
 
 	validate_mm(mm);
@@ -1382,7 +1388,13 @@ unsigned long do_mmap_to(struct mm_struct *mm, struct file *file, unsigned long 
 			vm_flags |= VM_NORESERVE;
 	}
 
-	addr = mmap_region_to(mm, file, addr, len, vm_flags, pgoff, uf);
+	pseudo_mm_flags = 0;
+	if ((flags & (MAP_ANONYMOUS | MAP_SHARED)) == 
+		(MAP_ANONYMOUS | MAP_SHARED)) {
+		pseudo_mm_flags |= PSEUDO_MM_VMA_ANON_SHARED;
+	}
+
+	addr = mmap_region_to(mm, file, addr, len, vm_flags, pgoff, uf, pseudo_mm_flags);
 	// if (!IS_ERR_VALUE(addr) &&
 	//     ((vm_flags & VM_LOCKED) ||
 	//      (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
@@ -2680,7 +2692,7 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
  */
 unsigned long mmap_region_to(struct mm_struct *mm, struct file *file, unsigned long addr,
 		unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
-		struct list_head *uf)
+		struct list_head *uf, unsigned long pseudo_mm_flag)
 {
 	struct vm_area_struct *vma = NULL;
 	struct vm_area_struct *next, *prev, *merge;
@@ -2759,6 +2771,7 @@ cannot_expand:
 	vma->vm_flags = vm_flags;
 	vma->vm_page_prot = vm_get_page_prot(vm_flags);
 	vma->vm_pgoff = pgoff;
+	vma->pseudo_mm_flag = pseudo_mm_flag;
 
 	if (file) {
 		if (vm_flags & VM_SHARED) {
