@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -279,43 +280,64 @@ FIXTURE_VARIANT_ADD(pseudo_mm_lifetime_simple, shared){
 	.flags = MAP_ANONYMOUS | MAP_SHARED,
 };
 
-TEST_F(pseudo_mm_lifetime_simple, step1)
+TEST_F(pseudo_mm_lifetime_simple, XXX)
 {
-	int ret, pseudo_mm_id, img_fd, i;
-	char ch;
-
-	img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-	ASSERT_GT(img_fd, 0);
-	for (i = 0; i < PAGE_SIZE; i++) {
-		ch = (i % 20) + 'a';
-		ret = pwrite(img_fd, (void *)(&ch), 1, i);
-		ASSERT_EQ(ret, 1);
-	}
-	fsync(img_fd);
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE, (void *)(&pseudo_mm_id));
-	ASSERT_EQ(ret, 0);
-	ASSERT_EQ(pseudo_mm_id, 1);
-
-	ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
-				       self->start, self->end, variant->flags);
-	ASSERT_EQ(ret, 0);
-	close(img_fd);
-}
-
-TEST_F(pseudo_mm_lifetime_simple, step2)
-{
-	int ret, pseudo_mm_id = 1;
 	pid_t pid;
 	struct pseudo_mm_attach_param attach_param;
+	int ret, pseudo_mm_id, img_fd, i, pipe_fd[2];
+	char ch;
 
+	/*
+	 * one process create, fill pseudo_mm then exit
+	 */
+	ASSERT_EQ(pipe(pipe_fd), 0);
+	pid = fork();
+	if (pid == 0) {
+		close(pipe_fd[0]);
+		img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+		ASSERT_GT(img_fd, 0);
+		for (i = 0; i < PAGE_SIZE; i++) {
+			ch = (i % 20) + 'a';
+			ret = pwrite(img_fd, (void *)(&ch), 1, i);
+			ASSERT_EQ(ret, 1);
+		}
+		fsync(img_fd);
+		ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
+			    (void *)(&pseudo_mm_id));
+		ASSERT_EQ(ret, 0);
+		ASSERT_GE(pseudo_mm_id, 1);
+
+		ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
+					       self->start, self->end,
+					       variant->flags);
+		ASSERT_EQ(ret, 0);
+		close(img_fd);
+		ASSERT_EQ(write(pipe_fd[1], &pseudo_mm_id,
+				sizeof(pseudo_mm_id)),
+			  sizeof(pseudo_mm_id));
+		close(pipe_fd[1]);
+		exit(EXIT_SUCCESS);
+	} else {
+		close(pipe_fd[1]);
+		ASSERT_EQ(waitpid(pid, NULL, 0), pid);
+	}
+	ASSERT_EQ(read(pipe_fd[0], &pseudo_mm_id, sizeof(pseudo_mm_id)),
+		  sizeof(pseudo_mm_id));
+	close(pipe_fd[0]);
+
+	// the creator of pseudo_mm has been terminated
 	pid = getpid();
 	attach_param.id = pseudo_mm_id;
 	attach_param.pid = pid;
 	ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
-	ASSERT_EQ(ret, 0);
+	ASSERT_EQ(ret, 0)
+	{
+		TH_LOG("pid %d pseudo_mm_id %d", pid, pseudo_mm_id);
+	}
 
 	ret = check_anon_page_content((void *)self->start);
 	ASSERT_EQ(ret, 0);
+
 	ret = ioctl(self->fd, PSEUDO_MM_IOC_DELETE, (void *)(&pseudo_mm_id));
 	ASSERT_EQ(ret, 0);
 }
@@ -370,8 +392,7 @@ TEST_F(single_page_anon_multi_attach, prepare)
 	int pseudo_mm_id, img_fd, ret, i;
 	char ch;
 
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
-				(void *)(&pseudo_mm_id));
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE, (void *)(&pseudo_mm_id));
 	ASSERT_TRUE(ret == 0 && pseudo_mm_id > 0);
 
 	TH_LOG("succeed to create a pseudo_mm (id = %d).", pseudo_mm_id);
@@ -390,6 +411,11 @@ TEST_F(single_page_anon_multi_attach, prepare)
 	close(img_fd);
 }
 
+/*
+ * 1. two processes A and B both do pseudo_mm_attach to itself.
+ * 2. A modify memory content in pseudo_mm area
+ * 3. B should not notice those modifications made by A.
+ */
 TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 {
 	// ctp means child(w)-to-parent(r) pipe
@@ -460,12 +486,80 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 		close(ctp[0]);
 		ASSERT_EQ(buf, 0);
 	}
+}
 
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_DELETE, (void *)(&pseudo_mm_id));
-	EXPECT_EQ(ret, 0)
-	{
-		TH_LOG("delete pseudo_mm %d failed: %d!", pseudo_mm_id, ret);
+/*
+ * 1. one process A attach a shared anon pseudo_mm.
+ * 2. A fork() a child process B.
+ * 3. A modify the memory content in the shared anon pseudo_mm area.
+ * 4. B should notice those modifications.
+ */
+TEST(multi_page_shared)
+{
+	const int page_num = 16;
+	int fd, img_fd, ret, pipe_fd[2], pseudo_mm_id, i;
+	pid_t pid;
+	char *iter, pipe_buf, ch;
+	const unsigned long start = 0xdead0UL << PAGE_SHIFT;
+	const unsigned long end = (0xdead0UL + page_num) << PAGE_SHIFT;
+	struct pseudo_mm_attach_param attach_param;
+
+	fd = open(DEVICE_PATH, O_RDWR);
+	ASSERT_GT(fd, 0);
+	ret = ioctl(fd, PSEUDO_MM_IOC_CREATE, (void *)(&pseudo_mm_id));
+	ASSERT_TRUE(ret == 0 && pseudo_mm_id > 0);
+
+	img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	ASSERT_GT(img_fd, 0);
+	for (i = 0; i < page_num * PAGE_SIZE; i++) {
+		ch = (i % 20) + 'A';
+		ret = pwrite(img_fd, (void *)(&ch), 1, i);
+		ASSERT_EQ(ret, 1);
 	}
+	fsync(img_fd);
+
+	ret = add_and_fill_anon_map_to(fd, img_fd, pseudo_mm_id, start, end,
+				       MAP_ANONYMOUS | MAP_SHARED);
+	close(img_fd);
+
+	pid = getpid();
+	// both child and parent need attach
+	attach_param.id = pseudo_mm_id;
+	attach_param.pid = pid;
+	ret = ioctl(fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
+	ASSERT_EQ(ret, 0);
+
+	ASSERT_EQ(pipe(pipe_fd), 0);
+	pid = fork();
+	ASSERT_GE(pid, 0);
+
+	if (pid == 0) {
+		// child
+		close(pipe_fd[1]);
+		ASSERT_EQ(read(pipe_fd[0], &pipe_buf, 1), 1);
+		close(pipe_fd[0]);
+		TH_LOG("child (pid %d) start check", getpid());
+		for (iter = (char *)start; iter < (char *)end; iter++) {
+			ASSERT_EQ(*iter, 'H')
+			{
+				TH_LOG("error at address #%p", iter);
+			}
+			if (*iter != 'H')
+				break;
+		}
+		TH_LOG("child check finish");
+		exit(EXIT_SUCCESS);
+	} else {
+		// parent
+		close(pipe_fd[0]);
+		for (iter = (char *)start; iter < (char *)end; iter++)
+			*iter = 'H';
+		TH_LOG("parent (pid = %d) finish modification", getpid());
+		ASSERT_EQ(write(pipe_fd[1], &pipe_buf, 1), 1);
+		close(pipe_fd[1]);
+	}
+
+	// do not delete pseudo_mm
 }
 
 TEST_HARNESS_MAIN

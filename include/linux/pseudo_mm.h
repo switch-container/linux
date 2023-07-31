@@ -3,12 +3,20 @@
 
 #include <linux/mm_types.h>
 #include <linux/xarray.h>
+#include <linux/rmap.h>
 
 struct pseudo_mm {
 	struct mm_struct *mm;
 	int id;
 	// refcount used to prevent anonymous shared memory from delete
 	refcount_t ref;
+};
+
+struct pseudo_mm_unmap_args {
+	enum ttu_flags flags;
+	struct vm_area_struct *curr;
+	pte_t orig_pte;
+	struct folio *old_folio;
 };
 
 /*

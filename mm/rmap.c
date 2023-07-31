@@ -74,6 +74,7 @@
 #include <linux/memremap.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/mm_inline.h>
+#include <linux/pseudo_mm.h>
 
 #include <asm/tlbflush.h>
 
@@ -1825,6 +1826,181 @@ void try_to_unmap(struct folio *folio, enum ttu_flags flags)
 		.done = page_not_mapped,
 		.anon_lock = folio_lock_anon_vma_read,
 	};
+
+	if (flags & TTU_RMAP_LOCKED)
+		rmap_walk_locked(folio, &rwc);
+	else
+		rmap_walk(folio, &rwc);
+}
+
+
+/*
+ * only used by pseudo_mm
+ */
+static bool try_to_unmap_one_pseudo_mm_anon_shared(struct folio *folio,
+		     struct vm_area_struct *vma, unsigned long address, void *arg)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
+	pte_t pteval;
+	struct page *subpage;
+	bool ret = true;
+	struct mmu_notifier_range range;
+	struct pseudo_mm_unmap_args *args =
+		(struct pseudo_mm_unmap_args *)(long)arg;
+	enum ttu_flags flags = args->flags;
+	struct folio *old_folio = args->old_folio;
+	/* This a hack since we pass folio of new page to try_to_unmap,
+	 * but the check of page_vma_mapped_walk() is based on pfn.
+	 * We "pretent" the old_page here.
+	 */
+	pvmw.pfn = folio_pfn(old_folio);
+	/*
+	 * skip current handling vma of PF handler
+	 * (i.e. pseudo_mm_wp_page_shared())
+	 */
+	if (vma == args->curr)
+		return ret;
+
+	/*
+	 * When racing against e.g. zap_pte_range() on another cpu,
+	 * in between its ptep_get_and_clear_full() and page_remove_rmap(),
+	 * try_to_unmap() may return before page_mapped() has become false,
+	 * if page table locking is skipped: use TTU_SYNC to wait for that.
+	 */
+	if (flags & TTU_SYNC)
+		pvmw.flags = PVMW_SYNC;
+
+	/*
+	 * For THP, we have to assume the worse case ie pmd for invalidation.
+	 * For hugetlb, it could be much worse if we need to do pud
+	 * invalidation in the case of pmd sharing.
+	 *
+	 * Note that the folio can not be freed in this function as call of
+	 * try_to_unmap() must hold a reference on the folio.
+	 */
+	range.end = vma_address_end(&pvmw);
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
+				address, range.end);
+	VM_WARN_ON_FOLIO(folio_test_hugetlb(folio), folio);
+	VM_WARN_ON_FOLIO(folio_test_anon(folio), folio);
+	VM_WARN_ON(userfaultfd_wp(vma));
+	mmu_notifier_invalidate_range_start(&range);
+
+	while (page_vma_mapped_walk(&pvmw)) {
+		// pr_info("page_vma_mapped_walk of vma #%p at addr #%lx\n", pvmw.vma, pvmw.address);
+		/* Unexpected PMD-mapped THP? */
+		VM_BUG_ON_FOLIO(!pvmw.pte, folio);
+		/* in theory, it should be the same */
+		VM_WARN_ON(!pte_same(*pvmw.pte, args->orig_pte));
+
+		/*
+		 * If the folio is in an mlock()d vma, we must not swap it out.
+		 */
+		if (vma->vm_flags & VM_LOCKED) {
+			/* Restore the mlock which got missed */
+			mlock_vma_folio(old_folio, vma, false);
+			page_vma_mapped_walk_done(&pvmw);
+			ret = false;
+			break;
+		}
+
+		subpage = folio_page(old_folio,
+					pte_pfn(*pvmw.pte) - folio_pfn(old_folio));
+		address = pvmw.address;
+
+		flush_cache_page(vma, address, pte_pfn(*pvmw.pte));
+		// pr_info("nuke PTE of vma #%p at address #%lx", vma, address);
+		/* Nuke the page table entry. */
+		if (should_defer_flush(mm, flags)) {
+			/*
+			 * We clear the PTE but do not flush so potentially
+			 * a remote CPU could still be writing to the folio.
+			 * If the entry was previously clean then the
+			 * architecture must guarantee that a clear->dirty
+			 * transition on a cached TLB entry is written through
+			 * and traps if the PTE is unmapped.
+			 */
+			pteval = ptep_get_and_clear(mm, address, pvmw.pte);
+
+			set_tlb_ubc_flush_pending(mm, pte_dirty(pteval));
+		} else {
+			pteval = ptep_clear_flush(vma, address, pvmw.pte);
+		}
+
+		/* Set the dirty flag on the folio now the pte is gone. */
+		if (pte_dirty(pteval))
+			folio_mark_dirty(old_folio);
+
+		/* Update high watermark before we lower rss */
+		update_hiwater_rss(mm);
+
+		if (PageHWPoison(subpage) && !(flags & TTU_IGNORE_HWPOISON)) {
+			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
+			dec_mm_counter(mm, mm_counter(&folio->page));
+			set_pte_at(mm, address, pvmw.pte, pteval);
+		} else if (pte_unused(pteval) && !userfaultfd_armed(vma)) {
+			/*
+			 * The guest indicated that the page content is of no
+			 * interest anymore. Simply discard the pte, vmscan
+			 * will take care of the rest.
+			 * A future reference will then fault in a new zero
+			 * page. When userfaultfd is active, we must not drop
+			 * this page though, as its main user (postcopy
+			 * migration) will not expect userfaults on already
+			 * copied pages.
+			 */
+			dec_mm_counter(mm, mm_counter(&folio->page));
+			/* We have to invalidate as we cleared the pte */
+			mmu_notifier_invalidate_range(mm, address,
+						      address + PAGE_SIZE);
+		} else {
+			/*
+			 * This is a locked file-backed folio,
+			 * so it cannot be removed from the page
+			 * cache and replaced by a new folio before
+			 * mmu_notifier_invalidate_range_end, so no
+			 * concurrent thread might update its page table
+			 * to point at a new folio while a device is
+			 * still using this folio.
+			 *
+			 * See Documentation/mm/mmu_notifier.rst
+			 */
+			dec_mm_counter(mm, mm_counter_file(&folio->page));
+		}
+		/*
+		 * No need to call mmu_notifier_invalidate_range() it has be
+		 * done above for all cases requiring it to happen under page
+		 * table lock before mmu_notifier_invalidate_range_end()
+		 *
+		 * See Documentation/mm/mmu_notifier.rst
+		 */
+		page_remove_rmap(subpage, vma, folio_test_hugetlb(old_folio));
+		if (vma->vm_flags & VM_LOCKED)
+			mlock_page_drain_local();
+		folio_put(old_folio);
+	}
+
+	mmu_notifier_invalidate_range_end(&range);
+
+	return ret;
+}
+
+/*
+ * only used by pseudo_mm
+ */
+void try_to_unmap_pseudo_mm_anon_shared(struct folio *folio,
+		   struct pseudo_mm_unmap_args *args)
+{
+	struct rmap_walk_control rwc = {
+		.rmap_one = try_to_unmap_one_pseudo_mm_anon_shared,
+		.arg = (void *)args,
+		.done = page_not_mapped,
+	};
+
+	enum ttu_flags flags = args->flags;
+	/* For now do not support fancy flags*/
+	WARN_ON(flags & (TTU_SPLIT_HUGE_PMD | TTU_IGNORE_MLOCK));
 
 	if (flags & TTU_RMAP_LOCKED)
 		rmap_walk_locked(folio, &rwc);

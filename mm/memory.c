@@ -77,6 +77,7 @@
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
+#include <linux/pseudo_mm.h>
 
 #include <trace/events/kmem.h>
 
@@ -3272,11 +3273,17 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 	pte_t entry;
 	int page_copied = 0;
 	struct mmu_notifier_range range;
+	struct folio *folio;
+	struct pseudo_mm_unmap_args unmap_args;
+
+	VM_BUG_ON(unshare);	// we do not expect unshare for now
+	VM_BUG_ON(!vma->vm_file);
 
 	get_page(old_page);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 
 	WARN_ON(!vma_is_pseudo_anon_shared(vma));
+	WARN_ON(pmd_none(*vmf->pmd));
 	delayacct_wpcopy_start();
 
 	// file-backed mapping do not need anon_vma
@@ -3287,17 +3294,18 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 	// now vma->page point to a new allocated page
 	if (unlikely(PageHWPoison(vmf->page))) {
 		struct page *page = vmf->page;
-		ret = VM_FAULT_HWPOISON;
+		vm_fault_t poisonret = VM_FAULT_HWPOISON;
 		if (ret & VM_FAULT_LOCKED) {
 			if (page_mapped(page))
 				unmap_mapping_pages(page_mapping(page),
 						    page->index, 1, false);
 			/* Retry if a clean page was removed from the cache. */
 			if (invalidate_inode_page(page))
-				ret = VM_FAULT_NOPAGE;
+				poisonret = VM_FAULT_NOPAGE;
 			unlock_page(page);
 		}
 		put_page(page);
+		ret = poisonret;
 		goto failed;
 	}
 	if (unlikely(!(ret & VM_FAULT_LOCKED)))
@@ -3369,38 +3377,57 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 		BUG_ON(unshare && pte_write(entry));
 		set_pte_at_notify(mm, vmf->address, vmf->pte, entry);
 		update_mmu_cache(vma, vmf->address, vmf->pte);
-		if (old_page) {
-			/*
-			 * Only after switching the pte to the new page may
-			 * we remove the mapcount here. Otherwise another
-			 * process may come and find the rmap count decremented
-			 * before the pte is switched to the new page, and
-			 * "reuse" the old page writing into it while our pte
-			 * here still points into it and can be read by other
-			 * threads.
-			 *
-			 * The critical issue is to order this
-			 * page_remove_rmap with the ptp_clear_flush above.
-			 * Those stores are ordered by (if nothing else,)
-			 * the barrier present in the atomic_add_negative
-			 * in page_remove_rmap.
-			 *
-			 * Then the TLB flush in ptep_clear_flush ensures that
-			 * no process can access the old page before the
-			 * decremented mapcount is visible. And the old page
-			 * cannot be reused until after the decremented
-			 * mapcount is visible. So transitively, TLBs to
-			 * old page will be flushed before it can be reused.
-			 */
-			page_remove_rmap(old_page, vma, false);
-		}
+		VM_WARN_ON(!old_page);
+		/*
+		 * Only after switching the pte to the new page may
+		 * we remove the mapcount here. Otherwise another
+		 * process may come and find the rmap count decremented
+		 * before the pte is switched to the new page, and
+		 * "reuse" the old page writing into it while our pte
+		 * here still points into it and can be read by other
+		 * threads.
+		 *
+		 * The critical issue is to order this
+		 * page_remove_rmap with the ptp_clear_flush above.
+		 * Those stores are ordered by (if nothing else,)
+		 * the barrier present in the atomic_add_negative
+		 * in page_remove_rmap.
+		 *
+		 * Then the TLB flush in ptep_clear_flush ensures that
+		 * no process can access the old page before the
+		 * decremented mapcount is visible. And the old page
+		 * cannot be reused until after the decremented
+		 * mapcount is visible. So transitively, TLBs to
+		 * old page will be flushed before it can be reused.
+		 */
+		// page_remove_rmap(old_page, vma, false);
+		//
+		// pr_info("try to unmap pseudo_mm_anon_shared of vma %p, new page = %p\n", vma, new_page);
+		// we have to unmap all pte of this vm_file
+		// so that all vma corresponding to this vm_file
+		// will notify the changes
+		folio = page_folio(new_page);
+		// this unmap will remove both rmap and refcount of old page if necessarg
+		unmap_args.flags = TTU_BATCH_FLUSH;
+		unmap_args.curr = vma;
+		unmap_args.orig_pte = vmf->orig_pte;
+		unmap_args.old_folio = page_folio(old_page);
+		try_to_unmap_pseudo_mm_anon_shared(folio, &unmap_args);
 
+		/*
+		 * We still has to handle current vma on our own.
+		 * The main reason is that we hold the lock of current pte,
+		 * so we cannot reply on try_to_unmap_pseudo_mm_anon_shared()
+		 */
+		page_remove_rmap(old_page, vma, false);
 		/* Free the old page.. */
 		new_page = old_page;
 		page_copied = 1;
 	} else {
 		update_mmu_tlb(vma, vmf->address, vmf->pte);
 	}
+
+	unlock_page(vmf->page);
 
 	if (new_page)
 		put_page(new_page);
@@ -3426,6 +3453,7 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 	return ret | ((page_copied && !unshare) ? VM_FAULT_WRITE : 0);
 
 oom_free_new:
+	unlock_page(vmf->page);
 	put_page(new_page);
 	ret = VM_FAULT_WRITE;
 
@@ -4736,13 +4764,17 @@ static vm_fault_t do_read_fault(struct vm_fault *vmf)
 	 */
 	if (should_fault_around(vmf)) {
 		ret = do_fault_around(vmf);
+		// if (vma_is_pseudo_anon_shared(vmf->vma))
+		// 	pr_info("vma #%p do_read_fault() get page in do_fault_around\n", vmf->vma);
 		if (ret)
 			return ret;
 	}
 
+
 	ret = __do_fault(vmf);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
 		return ret;
+
 
 	ret |= finish_fault(vmf);
 	unlock_page(vmf->page);

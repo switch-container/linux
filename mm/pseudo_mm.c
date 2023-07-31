@@ -126,7 +126,8 @@ struct pseudo_mm *find_pseudo_mm(int id)
 
 	// invalid id
 	if (unlikely(id <= 0)) {
-		pr_warn("find pseudo_mm with invalid id = %d\n", id);
+		pr_warn("process %d find pseudo_mm with invalid id = %d\n",
+			current->pid, id);
 		return NULL;
 	}
 
@@ -234,6 +235,9 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 			start + size);
 		return -EINVAL;
 	}
+
+	// if (vma->vm_file)
+	// 	pr_info("pseudo_mm vm_file's mapping = #%p\n", vma->vm_file->f_mapping);
 
 	nr_pages = size >> PAGE_SHIFT;
 	// we are going to fill the content of this page
@@ -373,11 +377,13 @@ static unsigned long pseudo_mm_attach_mmap(int id, struct pseudo_mm *pseudo_mm,
 		if (vma_is_pseudo_anon_shared(mpnt)) {
 			tmp->pseudo_mm_flag |= id;
 			// setup a new sheme zero file when attach
+			// pr_info("pseudo_mm old vm_file's mapping = #%p", tmp->vm_file->f_mapping);
 			tmp->vm_file = NULL;
 			retval = shmem_zero_setup(tmp);
 			if (retval)
 				goto fail_with_retval;
 			file = tmp->vm_file;
+			// pr_info(", new vm_file's mapping = #%p\n", file->f_mapping);
 			BUG_ON(!file);
 
 			i_mmap_lock_write(file->f_mapping);
