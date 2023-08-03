@@ -8,8 +8,6 @@
 struct pseudo_mm {
 	struct mm_struct *mm;
 	int id;
-	// refcount used to prevent anonymous shared memory from delete
-	refcount_t ref;
 };
 
 struct pseudo_mm_unmap_args {
@@ -26,16 +24,22 @@ struct pseudo_mm_unmap_args {
  */
 int create_pseudo_mm(void);
 struct pseudo_mm *find_pseudo_mm(int id);
+
+/*
+ * put_pseudo_mm_with_id() - delete the pseudo_mm corresponding to id
+ * @id: the id of the pseudo_mm that needed to be deleted, -1 to delete
+ * all pseudo_mm
+ */
 void put_pseudo_mm_with_id(int id);
 /*
- * Add an anonymous memory mapping to this pseudo_mm.
- * This will not fill content of the physical page
+ * Add a memory mapping to this pseudo_mm.
+ * This will not fill content of the physical page.
  *
  * The meaning of params is the same as mmap()
  */
-unsigned long pseudo_mm_add_anon_map(int id, unsigned long start,
+unsigned long pseudo_mm_add_map(int id, unsigned long start,
 				     unsigned long size, unsigned long prot,
-				     unsigned long flags);
+				     unsigned long flags, int fd, pgoff_t pgoff);
 
 /*
  * pseudo_mm_fill_anon_map() - Fill the memory content of the vma
@@ -63,4 +67,7 @@ unsigned long pseudo_mm_add_file_map(int id, unsigned long start,
  * @id: pseudo_mm_id
  */
 unsigned long pseudo_mm_attach(pid_t pid, int id);
+
+/* debug purpose */
+void debug_weird_page(struct page *page, int expected_mapcount);
 #endif

@@ -142,9 +142,6 @@ static void remove_vma(struct vm_area_struct *vma)
 		vma->vm_ops->close(vma);
 	if (vma->vm_file)
 		fput(vma->vm_file);
-	if (vma_is_pseudo_anon_shared(vma)) {
-		put_pseudo_mm_with_id(lower_32_bits(vma->pseudo_mm_flag));
-	}
 	mpol_put(vma_policy(vma));
 	vm_area_free(vma);
 }

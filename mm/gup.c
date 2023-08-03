@@ -641,6 +641,10 @@ retry:
 			goto out;
 		}
 	}
+	// if (vma_is_pseudo_anon_shared(vma)) {
+	// 	pr_info("follow_page_pte find page %p in vma %p mapcount %d refcount %d\n", page, vma, page_mapcount(page), page_ref_count(page));
+	// 	debug_weird_page(page, 1);
+	// }
 	if (flags & FOLL_TOUCH) {
 		if ((flags & FOLL_WRITE) &&
 		    !pte_dirty(pte) && !PageDirty(page))

@@ -45,9 +45,9 @@ static int pseudo_mm_release(struct inode *inode, struct file *filp)
 }
 
 // Return 0 when succeed
-static long _pseudo_mm_add_anon(void *__user args)
+static long _pseudo_mm_add_map(void *__user args)
 {
-	struct pseudo_mm_add_anon_param param;
+	struct pseudo_mm_add_map_param param;
 	unsigned long err = 0;
 	unsigned long start, size;
 
@@ -59,8 +59,8 @@ static long _pseudo_mm_add_anon(void *__user args)
 		return -EINVAL;
 	size = param.end - param.start;
 
-	err = pseudo_mm_add_anon_map(param.id, start, size, param.prot,
-				     param.flags);
+	err = pseudo_mm_add_map(param.id, start, size, param.prot,
+				     param.flags, param.fd, param.pgoff);
 	return err;
 }
 
@@ -132,8 +132,8 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return err;
 		put_pseudo_mm_with_id(pseudo_mm_id);
 		break;
-	case PSEUDO_MM_IOC_ADD_ANON:
-		err = _pseudo_mm_add_anon((void *)args);
+	case PSEUDO_MM_IOC_ADD_MAP:
+		err = _pseudo_mm_add_map((void *)args);
 		if (err)
 			return err;
 		break;

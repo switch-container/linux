@@ -1836,6 +1836,9 @@ void try_to_unmap(struct folio *folio, enum ttu_flags flags)
 
 /*
  * only used by pseudo_mm
+ * @folio: since we need folio_mapping(folio) to find all vma,
+ *   so this folio point to new_page
+ * @vma: the vma of the shmem file in this iteration
  */
 static bool try_to_unmap_one_pseudo_mm_anon_shared(struct folio *folio,
 		     struct vm_area_struct *vma, unsigned long address, void *arg)
@@ -1992,6 +1995,7 @@ static bool try_to_unmap_one_pseudo_mm_anon_shared(struct folio *folio,
 void try_to_unmap_pseudo_mm_anon_shared(struct folio *folio,
 		   struct pseudo_mm_unmap_args *args)
 {
+	int we_locked = 0;
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one_pseudo_mm_anon_shared,
 		.arg = (void *)args,
@@ -2002,10 +2006,18 @@ void try_to_unmap_pseudo_mm_anon_shared(struct folio *folio,
 	/* For now do not support fancy flags*/
 	WARN_ON(flags & (TTU_SPLIT_HUGE_PMD | TTU_IGNORE_MLOCK));
 
+	if(!folio_test_locked(args->old_folio)) {
+		we_locked = 1;
+		folio_lock(args->old_folio);
+	}
+
 	if (flags & TTU_RMAP_LOCKED)
 		rmap_walk_locked(folio, &rwc);
 	else
 		rmap_walk(folio, &rwc);
+
+	if (we_locked)
+		folio_unlock(args->old_folio);
 }
 
 /*

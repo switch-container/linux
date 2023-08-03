@@ -2085,6 +2085,8 @@ static vm_fault_t shmem_fault(struct vm_fault *vmf)
 	 */
 	if (unlikely(inode->i_private)) {
 		struct shmem_falloc *shmem_falloc;
+		// if (vma_is_pseudo_anon_shared(vma))
+		// 	pr_info("inode->i_private in shmem_fault()\n");
 
 		spin_lock(&inode->i_lock);
 		shmem_falloc = inode->i_private;
@@ -4276,6 +4278,7 @@ int shmem_zero_setup(struct vm_area_struct *vma)
 		fput(vma->vm_file);
 	vma->vm_file = file;
 	vma->vm_ops = &shmem_vm_ops;
+	// pr_info("shmem_zero_setup: new file inode %p address space %p\n", file->f_inode, file->f_mapping);
 
 	return 0;
 }

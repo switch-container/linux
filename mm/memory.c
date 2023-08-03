@@ -1260,6 +1260,7 @@ vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 	if (src_vma->anon_vma)
 		return true;
 
+	// pseudo_mm anon shared area should copy page table entries
 	if (unlikely(vma_is_pseudo_anon_shared(src_vma)))
 		return true;
 
@@ -1449,6 +1450,9 @@ again:
 			}
 			rss[mm_counter(page)]--;
 			page_remove_rmap(page, vma, false);
+			//if (vma_is_pseudo_anon_shared(vma))
+			//	pr_info("process %d zap_pte_range vma %p after remove page %p 's rmap mapcount %d\n",
+			//			current->pid, vma, page, page_mapcount(page));
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
 			if (unlikely(__tlb_remove_page(tlb, page))) {
@@ -3318,8 +3322,10 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 	WARN_ON(PageAnon(old_page) || PageAnon(new_page));
 
 	// pr_info("pid %d pseudo_mm_wp_page_shared:"
-	// 			 " old page %p (mapcount = %d), new page %p (mapcount = %d)\n",
-	// 			 current->pid, old_page, page_mapcount(old_page), new_page, page_mapcount(new_page));
+	// 			 " old page %p (mapcount = %d refcount = %d), new page %p (mapcount = %d refcount = %d)\n",
+	// 			 current->pid, old_page, page_mapcount(old_page), page_ref_count(old_page),
+	// 			 new_page, page_mapcount(new_page), page_ref_count(new_page));
+	// debug_weird_page(new_page, 0);
 
 	// copy page
 	copy_user_highpage(new_page, old_page, vmf->address, vma);
@@ -3342,7 +3348,7 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 	vmf->pte = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
 	if (likely(pte_same(*vmf->pte, vmf->orig_pte))) {
 		// TODO(huang-jl) since old_page and new_page suppose to be same counter_file
-		// so we could not dec and inc mm_counter
+		// so we probably could not dec and inc mm_counter
 		dec_mm_counter_fast(mm,
 				mm_counter_file(old_page));
 		inc_mm_counter_fast(mm,
@@ -3368,7 +3374,8 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 		 */
 		ptep_clear_flush_notify(vma, vmf->address, vmf->pte);
 		page_add_file_rmap(new_page, vma, false);
-		lru_cache_add_inactive_or_unevictable(new_page, vma);
+		// lru_cache_add_inactive_or_unevictable(new_page, vma);
+		// pr_info("new page %p refcount %d\n", new_page, page_ref_count(new_page));
 		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
@@ -3427,29 +3434,34 @@ static vm_fault_t pseudo_mm_wp_page_shared(struct vm_fault *vmf)
 		update_mmu_tlb(vma, vmf->address, vmf->pte);
 	}
 
-	unlock_page(vmf->page);
-
 	if (new_page)
 		put_page(new_page);
-
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
-	ret = fault_dirty_shared_page(vmf);
 
+	// unlock new page
+	if (page_copied)
+		ret |= fault_dirty_shared_page(vmf);
+	else
+		unlock_page(vmf->page);
 	/*
 	 * No need to double call mmu_notifier->invalidate_range() callback as
 	 * the above ptep_clear_flush_notify() did already call it.
 	 */
 	mmu_notifier_invalidate_range_only_end(&range);
 	if (old_page) {
-		if (page_copied)
-			free_swap_cache(old_page);
+		// TODO (huang-jl)s ince this is file-backed mapping, no need to free swap cache
+		// if (page_copied)
+		// 	free_swap_cache(old_page);
 		put_page(old_page);
 	}
 
 	delayacct_wpcopy_end();
 	// pr_info("pid %d pseudo_mm_wp_page_shared:"
-	// 			 " when finish old page %p (mapcount = %d)\n",
-	// 			 current->pid, old_page, page_mapcount(old_page));
+	// 			 " when finish old page %p (mapcount = %d refcount = %d) new page %p (mapcount = %d refcount = %d)\n",
+	// 			 current->pid, old_page, page_mapcount(old_page), page_ref_count(old_page),
+	// 			 vmf->page, page_mapcount(vmf->page), page_ref_count(vmf->page));
+	// if (ret)
+	// 	pr_warn("return value %u", ret);
 	return ret | ((page_copied && !unshare) ? VM_FAULT_WRITE : 0);
 
 oom_free_new:

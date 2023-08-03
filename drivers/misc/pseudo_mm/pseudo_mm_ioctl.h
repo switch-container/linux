@@ -6,12 +6,14 @@
 
 #define PSEUDO_MM_IOC_MAGIC 0x1c
 
-struct pseudo_mm_add_anon_param {
+struct pseudo_mm_add_map_param {
 	int id;
 	unsigned long start;
 	unsigned long end;
 	unsigned long prot;
 	unsigned long flags;
+	int fd;
+	off_t pgoff;
 };
 
 struct pseudo_mm_fill_anon_param {
@@ -29,7 +31,7 @@ struct pseudo_mm_attach_param {
 
 #define PSEUDO_MM_IOC_CREATE _IOR(PSEUDO_MM_IOC_MAGIC, 0x00, int *)
 #define PSEUDO_MM_IOC_DELETE _IOW(PSEUDO_MM_IOC_MAGIC, 0x01, int *)
-#define PSEUDO_MM_IOC_ADD_ANON \
+#define PSEUDO_MM_IOC_ADD_MAP \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x02, struct pseudo_mm_add_anon_param *)
 #define PSEUDO_MM_IOC_FILL_ANON \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x03, struct pseudo_mm_fill_anon_param *)

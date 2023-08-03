@@ -3,7 +3,7 @@
 CFLAGS = -Wall \
          -O2
 
-# TEST_PROGS := run_unprivileged_remount.sh run_nosymfollow.sh
-TEST_GEN_PROGS := anon-only
+TEST_PROGS := run.sh
+TEST_GEN_PROGS := anon_only file_only
 
 include ../lib.mk
