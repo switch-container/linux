@@ -5,9 +5,19 @@
 #include <linux/xarray.h>
 #include <linux/rmap.h>
 
+#define PSEUDO_MM_DEBUG
+
 struct pseudo_mm {
 	struct mm_struct *mm;
 	int id;
+	/* list of pseudo_mm_pin_pages */
+	struct list_head pages_list;
+};
+
+struct pseudo_mm_pin_pages {
+	struct list_head list;
+	long nr_pin_pages;
+	struct page **pages;
 };
 
 struct pseudo_mm_unmap_args {

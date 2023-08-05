@@ -32,6 +32,7 @@ static struct kmem_cache *pseudo_mm_cachep;
 
 #define PSEUDO_MM_ID_MAX INT_MAX
 
+#ifdef PSEUDO_MM_DEBUG
 static bool __maybe_unused show_rmap_vma(struct folio *folio,
 					 struct vm_area_struct *vma,
 					 unsigned long address, void *arg)
@@ -61,6 +62,11 @@ void __maybe_unused debug_weird_page(struct page *page, int expected_mapcount)
 	if (we_locked)
 		folio_unlock(folio);
 }
+#else
+void __maybe_unused debug_weird_page(struct page *page, int expected_mapcount)
+{
+}
+#endif
 
 /*
  * fill_page_from_file() - fill the content of the physical page from image file
@@ -131,6 +137,7 @@ int create_pseudo_mm(void)
 		goto drop_mm;
 	}
 	pseudo_mm->mm = mm;
+	INIT_LIST_HEAD(&pseudo_mm->pages_list);
 
 	// insert newly created pseudo into xarray
 	limit = XA_LIMIT(1, PSEUDO_MM_ID_MAX);
@@ -168,6 +175,13 @@ struct pseudo_mm *find_pseudo_mm(int id)
 
 static void put_pseudo_mm(struct pseudo_mm *pseudo_mm)
 {
+	struct pseudo_mm_pin_pages *pin_page, *tmp;
+	list_for_each_entry_safe(pin_page, tmp, &pseudo_mm->pages_list, list) {
+		list_del(&pin_page->list);
+		unpin_user_pages(pin_page->pages, pin_page->nr_pin_pages);
+		kvfree(pin_page->pages);
+		kfree(pin_page);
+	}
 	if (pseudo_mm->mm)
 		mmput(pseudo_mm->mm);
 	if (pseudo_mm->id > 0)
@@ -253,6 +267,7 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 	struct pseudo_mm *pseudo_mm;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
+	struct pseudo_mm_pin_pages *pin_page = NULL;
 	struct page **pages;
 	unsigned long gup_flags, ret;
 	int nr_pages, i;
@@ -293,7 +308,7 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 
 	nr_pages = size >> PAGE_SHIFT;
 	// we are going to fill the content of this page
-	gup_flags = FOLL_WRITE | FOLL_TOUCH | FOLL_FORCE;
+	gup_flags = FOLL_WRITE | FOLL_TOUCH | FOLL_FORCE | FOLL_LONGTERM;
 	pages = kvmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
 	if (!pages)
 		return -ENOMEM;
@@ -303,8 +318,8 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 	nr_pin_pages =
 		pin_user_pages_of(mm, start, nr_pages, gup_flags, pages, NULL);
 	if (nr_pin_pages != nr_pages) {
-		ret = -ENOMEM;
-		goto pin_page_failed;
+		ret = nr_pin_pages < 0 ? nr_pin_pages : -ENOMEM;
+		goto failed;
 	}
 
 	for (i = 0; i < nr_pages; i++) {
@@ -316,21 +331,27 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 					  offset + i * PAGE_SIZE);
 		if (ret) {
 			ret = -EIO;
-			goto fill_page_failed;
+			goto failed;
 		}
 	}
-	if (nr_pin_pages > 0)
-		unpin_user_pages(pages, nr_pin_pages);
 
-	kvfree(pages);
+	pin_page = kmalloc(sizeof(*pin_page), GFP_KERNEL);
+	if (!pin_page) {
+		ret = -ENOMEM;
+		goto failed;
+	}
+	INIT_LIST_HEAD(&pin_page->list);
+	pin_page->pages = pages;
+	pin_page->nr_pin_pages = nr_pin_pages;
+	list_add(&pin_page->list, &pseudo_mm->pages_list);
 	return 0;
 
-pin_page_failed:
+failed:
 	if (nr_pin_pages > 0)
 		unpin_user_pages(pages, nr_pin_pages);
-
-fill_page_failed:
 	kvfree(pages);
+	if (pin_page)
+		kfree(pin_page);
 	return ret;
 }
 
@@ -451,7 +472,7 @@ static unsigned long pseudo_mm_attach_mmap(int id, struct pseudo_mm *pseudo_mm,
 			i_mmap_unlock_write(file->f_mapping);
 			mapping_unmap_writable(file->f_mapping);
 			/* TODO (huang-jl) is this needed ? */
-			// uprobe_mmap(tmp); 
+			// uprobe_mmap(tmp);
 			goto skip_normal_file;
 		}
 
@@ -514,6 +535,7 @@ skip_normal_file:
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(tmp, mpnt);
 
+#ifdef PSEUDO_MM_DEBUG
 		// Debug: check for page table entry
 		if (vma_is_pseudo_anon_shared(tmp)) {
 			addr = tmp->vm_start;
@@ -538,6 +560,7 @@ skip_normal_file:
 				addr += PAGE_SIZE;
 			}
 		}
+#endif
 
 		if (vma_is_pseudo_anon_shared(mpnt)) {
 			tmp->vm_flags = tmp_vm_flags;
