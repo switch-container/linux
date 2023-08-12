@@ -424,8 +424,10 @@ extern unsigned int kobjsize(const void *objp);
 #endif
 #define VM_FLAGS_CLEAR	(ARCH_VM_PKEY_FLAGS | VM_ARCH_CLEAR)
 
-/* The low 32-bit of vma->pseudo_mm_flag is pseudo_mm id */
-#define PSEUDO_MM_VMA_ANON_SHARED	0x1
+/* The pseudo_mm flag in struct vma */
+#define PSEUDO_MM_VMA							0x1	/* related to pseudo_mm*/
+#define PSEUDO_MM_VMA_MASTER			0x2	/* the vma belongs to pseudo_mm (i.e. not vma copied when attachment) */
+#define PSEUDO_MM_VMA_ANON_SHARED	0x4
 
 /*
  * mapping from the currently active vm_flags protection bits (the

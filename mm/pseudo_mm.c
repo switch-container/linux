@@ -27,6 +27,7 @@
 DEFINE_XARRAY_ALLOC1(pseudo_mm_array);
 /* kmemcache for pseudo_mm struct */
 static struct kmem_cache *pseudo_mm_cachep;
+static struct pseudo_mm_backend backend;
 
 #define pseudo_mm_alloc() (kmem_cache_alloc(pseudo_mm_cachep, GFP_KERNEL))
 
@@ -115,6 +116,31 @@ int __init pseudo_mm_cache_init(void)
 }
 postcore_initcall(pseudo_mm_cache_init);
 
+unsigned long register_backend_dax_device(int fd)
+{
+	struct file *backend_file;
+	unsigned long ret;
+
+	if (backend.filp)
+		return -EEXIST;
+
+	backend_file = fget(fd);
+	if (!backend_file)
+		return -EBADF;
+	if (!IS_DAX(backend_file->f_mapping->host)) {
+		ret = -EBADF;
+		goto err;
+	}
+	backend.filp = backend_file;
+	backend.allocated_pg = 0;
+	spin_lock_init(&backend.lock);
+
+	return 0;
+err:
+	fput(backend_file);
+	return ret;
+}
+
 /*
  * create a pseudo_mm struct and initialize it
  *
@@ -126,6 +152,11 @@ int create_pseudo_mm(void)
 	struct pseudo_mm *pseudo_mm;
 	struct xa_limit limit;
 	int ret, id;
+
+	if (!backend.filp) {
+		pr_warn("do not register pseudo_mm backend!\n");
+		return -ENOENT;
+	}
 
 	mm = mm_alloc_wo_task();
 	if (!mm)
@@ -321,7 +352,20 @@ unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
 		ret = nr_pin_pages < 0 ? nr_pin_pages : -ENOMEM;
 		goto failed;
 	}
-
+#ifdef PSEUDO_MM_DEBUG
+	if (vma_is_anonymous(vma)) {
+		for (i = 0; i < nr_pin_pages; i++) {
+			pr_info("pin pages idx %d: %#lx\n", i,
+				(unsigned long)pages[i]);
+			if (i > 0 && (pages[i - 1] + 1) != pages[i]) {
+				pr_warn("page %d vs %d not continuous\n", i - 1,
+					i);
+				ret = -EFAULT;
+				goto failed;
+			}
+		}
+	}
+#endif
 	for (i = 0; i < nr_pages; i++) {
 		// pr_info("process %d before fill page in vma %p (%d / %d) %p mapcount = %d refcount = %d\n",
 		// 	current->pid, vma, i, nr_pages, pages[i],
@@ -451,6 +495,8 @@ static unsigned long pseudo_mm_attach_mmap(int id, struct pseudo_mm *pseudo_mm,
 			goto fail_nomem_anon_vma_fork;
 
 		tmp->vm_flags &= ~(VM_LOCKED | VM_LOCKONFAULT);
+		// newly created vma should not be master
+		tmp->pseudo_mm_flag &= ~PSEUDO_MM_VMA_MASTER;
 		// we try to setup a new zero shmem file in page_fault_handler
 		if (vma_is_pseudo_anon_shared(mpnt)) {
 			// tmp->pseudo_mm_flag |= id;
@@ -644,4 +690,9 @@ unsigned long pseudo_mm_attach(pid_t pid, int id)
 bool vma_is_pseudo_anon_shared(struct vm_area_struct *vma)
 {
 	return !!(vma->pseudo_mm_flag & PSEUDO_MM_VMA_ANON_SHARED);
+}
+
+inline struct pseudo_mm_backend *pseudo_mm_get_backend(void)
+{
+	return &backend;
 }

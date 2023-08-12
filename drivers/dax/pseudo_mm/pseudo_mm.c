@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/pseudo_mm.h>
 
+#include "pseudo_mm_memory.h"
 #include "pseudo_mm_ioctl.h"
 
 static int pseudo_mm_open(struct inode *, struct file *);
@@ -107,7 +108,7 @@ static long _pseudo_mm_attach(void *__user args)
 static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 				     unsigned long args)
 {
-	int pseudo_mm_id;
+	int pseudo_mm_id, fd;
 	long err = 0;
 
 	// all ioctl in pseudo_mm need args
@@ -115,6 +116,14 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		return -EINVAL;
 
 	switch (cmd) {
+	case PSEUDO_MM_IOC_REGISTER:
+		err = copy_from_user(&fd, (const void *)args, sizeof(fd));
+		if (err)
+				return err;
+		err  = register_backend_dax_device(fd);
+		if (err)
+				return err;
+		break;
 	case PSEUDO_MM_IOC_CREATE:
 		// create a new pseudo_mm and return the id of it
 		pseudo_mm_id = create_pseudo_mm();
@@ -164,6 +173,7 @@ static int __init pseudo_mm_driver_init(void)
 		pr_err("pseudo_mm_misc driver register failed\n");
 		return err;
 	}
+
 
 	pr_info("pseudo_mm_misc driver register succeed !\n");
 	return 0;

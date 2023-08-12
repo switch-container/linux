@@ -4,6 +4,6 @@ CFLAGS = -Wall \
          -O2
 
 TEST_PROGS := run.sh
-TEST_GEN_PROGS := anon_only file_only
+TEST_GEN_PROGS := anon_only file_only register
 
 include ../lib.mk

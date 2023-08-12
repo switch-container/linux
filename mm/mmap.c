@@ -1385,7 +1385,7 @@ unsigned long do_mmap_to(struct mm_struct *mm, struct file *file, unsigned long 
 			vm_flags |= VM_NORESERVE;
 	}
 
-	pseudo_mm_flags = 0;
+	pseudo_mm_flags = PSEUDO_MM_VMA | PSEUDO_MM_VMA_MASTER;
 	if ((flags & (MAP_ANONYMOUS | MAP_SHARED)) == 
 		(MAP_ANONYMOUS | MAP_SHARED)) {
 		pseudo_mm_flags |= PSEUDO_MM_VMA_ANON_SHARED;
@@ -2684,8 +2684,6 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
  * the first argument `mm`.
  *
  * This function is used only by pseudo_mm
- *
- * TODO (huang-jl) merge this with mmap_region
  */
 unsigned long mmap_region_to(struct mm_struct *mm, struct file *file, unsigned long addr,
 		unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,

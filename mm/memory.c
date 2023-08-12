@@ -4340,7 +4340,11 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	/* Allocate our own private page. */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
-	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+	// for PSEUDO_MM_VMA_MASTER vma, we alloc the page from dax device directly
+	if (unlikely(vma_is_pseudo_mm_master(vma)))
+		page = pseudo_mm_alloc_page();
+	else
+		page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
 	if (!page)
 		goto oom;
 
@@ -4355,11 +4359,14 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	 */
 	__SetPageUptodate(page);
 
-	entry = mk_pte(page, vma->vm_page_prot);
-	entry = pte_sw_mkyoung(entry);
-	if (vma->vm_flags & VM_WRITE)
-		entry = pte_mkwrite(pte_mkdirty(entry));
-
+	if (unlikely(vma_is_pseudo_mm_master(vma))) {
+		entry = pseudo_mm_page_to_pte(page, vmf);
+	} else {
+		entry = mk_pte(page, vma->vm_page_prot);
+		entry = pte_sw_mkyoung(entry);
+		if (vma->vm_flags & VM_WRITE)
+			entry = pte_mkwrite(pte_mkdirty(entry));
+	}
 	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
 			&vmf->ptl);
 	if (!pte_none(*vmf->pte)) {
