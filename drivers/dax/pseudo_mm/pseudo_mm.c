@@ -60,36 +60,8 @@ static long _pseudo_mm_add_map(void *__user args)
 		return -EINVAL;
 	size = param.end - param.start;
 
-	err = pseudo_mm_add_map(param.id, start, size, param.prot,
-				     param.flags, param.fd, param.pgoff);
-	return err;
-}
-
-static long _pseudo_mm_fill_anon(void *__user args)
-{
-	struct pseudo_mm_fill_anon_param param;
-	struct file *image;
-	unsigned long err = 0;
-	unsigned long start, size;
-
-	err = copy_from_user(&param, args, sizeof(param));
-	if (err)
-		return err;
-	start = param.start;
-	if (param.end < param.start)
-		return -EINVAL;
-	size = param.end - param.start;
-
-	image = fget(param.fd);
-	if (!image) {
-		pr_warn("pseudo_mm_misc driver recv invalid fd %d\n", param.fd);
-		return -ENOENT;
-	}
-	err = pseudo_mm_fill_anon_map(param.id, start, size, image,
-				      param.offset);
-
-	fput(image);
-
+	err = pseudo_mm_add_map(param.id, start, size, param.prot, param.flags,
+				param.fd, param.offset >> PAGE_SHIFT);
 	return err;
 }
 
@@ -102,6 +74,18 @@ static long _pseudo_mm_attach(void *__user args)
 	if (err)
 		return err;
 	err = pseudo_mm_attach(param.pid, param.id);
+	return err;
+}
+
+static long _pseudo_mm_setup_pt(void *__user args)
+{
+	struct pseudo_mm_setup_pt_param param;
+	unsigned long err;
+	err = copy_from_user(&param, args, sizeof(param));
+	if (err)
+		return err;
+	err = pseudo_mm_setup_pt(param.id, param.start, param.size,
+				 param.pgoff);
 	return err;
 }
 
@@ -119,10 +103,10 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	case PSEUDO_MM_IOC_REGISTER:
 		err = copy_from_user(&fd, (const void *)args, sizeof(fd));
 		if (err)
-				return err;
-		err  = register_backend_dax_device(fd);
+			return err;
+		err = register_backend_dax_device(fd);
 		if (err)
-				return err;
+			return err;
 		break;
 	case PSEUDO_MM_IOC_CREATE:
 		// create a new pseudo_mm and return the id of it
@@ -146,8 +130,8 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		if (err)
 			return err;
 		break;
-	case PSEUDO_MM_IOC_FILL_ANON:
-		err = _pseudo_mm_fill_anon((void *)args);
+	case PSEUDO_MM_IOC_SETUP_PT:
+		err = _pseudo_mm_setup_pt((void *)args);
 		if (err)
 			return err;
 		break;
@@ -173,7 +157,6 @@ static int __init pseudo_mm_driver_init(void)
 		pr_err("pseudo_mm_misc driver register failed\n");
 		return err;
 	}
-
 
 	pr_info("pseudo_mm_misc driver register succeed !\n");
 	return 0;

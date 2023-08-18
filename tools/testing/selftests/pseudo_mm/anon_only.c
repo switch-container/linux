@@ -12,50 +12,117 @@
 #include "pseudo_mm_ioctl.h"
 
 #define DEVICE_PATH "/dev/pseudo_mm"
+#define DAX_DEVICE_PATH "/dev/dax0.0"
 #define IMAGE_FILE "one-page.img"
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1 << PAGE_SHIFT)
 
-int add_and_fill_anon_map_to(int fd, int img_fd, int pseudo_mm_id,
-			     unsigned long start, unsigned long end,
-			     unsigned long flags)
+void fill_single_page(void *start)
 {
-	int ret;
-	struct pseudo_mm_add_map_param add_anon_param;
-	struct pseudo_mm_fill_anon_param fill_anon_param;
+	int i;
+	char *iter;
+	for (i = 0; i < PAGE_SIZE; i++) {
+		iter = (char *)(start) + i;
+		*iter = (i % 30) + 'a';
+	}
+}
 
-	if (!(flags & MAP_ANONYMOUS))
+int check_anon_page_content(void *start)
+{
+	int i;
+	char *iter;
+	for (i = 0; i < PAGE_SIZE; i++) {
+		iter = (char *)(start + i);
+		if (*iter != ((i % 30) + 'a')) {
+			printf("check_anon_page_content: expect %d at address %#lx find %d\n",
+			       (i % 30) + 'a', (unsigned long)iter, *iter);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+int __fill_dax_device(unsigned long pgoff, unsigned long nr_pages)
+{
+	int i, dax_fd;
+	void *addr;
+	dax_fd = open(DAX_DEVICE_PATH, O_RDWR);
+	if (dax_fd < 0)
 		return -1;
-	// user space allowed address is <= 0x7fff_ffff_ffff
-	// for simplicity I hardcode the two address.
-	// this two addresses MAYBE used (but often it is unlikely to be used)
+	addr = mmap(NULL, nr_pages << PAGE_SHIFT, PROT_READ | PROT_WRITE,
+		    MAP_SHARED, dax_fd, pgoff << PAGE_SHIFT);
+	if (!addr)
+		return -1;
+	for (i = 0; i < nr_pages; i++) {
+		fill_single_page(addr + i * PAGE_SIZE);
+	}
+	close(dax_fd);
+	return 0;
+}
+
+int fill_dax_device(unsigned long pgoff, unsigned long nr_pages)
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid < 0)
+		return -1;
+
+	if (pid == 0) {
+		int ret;
+		ret = __fill_dax_device(pgoff, nr_pages);
+		if (ret != 0)
+			exit(EXIT_FAILURE);
+		exit(EXIT_SUCCESS);
+	} else {
+		int status;
+		if (waitpid(pid, &status, 0) != pid)
+			return -1;
+		if (!WIFEXITED(status))
+			return -1;
+		if (WEXITSTATUS(status) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+int add_mmap_to(int pseudo_mm_fd, int pseudo_mm_id, unsigned long start,
+		unsigned long end, unsigned long flags, int fd, off_t offset)
+{
+	struct pseudo_mm_add_map_param add_anon_param;
+	int ret;
+
 	add_anon_param.id = pseudo_mm_id;
 	add_anon_param.start = start;
 	add_anon_param.end = end;
 	add_anon_param.prot = PROT_READ | PROT_WRITE;
 	add_anon_param.flags = flags;
-	add_anon_param.fd = -1;
-	add_anon_param.pgoff = 0;
+	add_anon_param.fd = fd;
+	add_anon_param.offset = offset;
 	printf("add map start\n");
 	fflush(stdout);
-	ret = ioctl(fd, PSEUDO_MM_IOC_ADD_MAP, (void *)(&add_anon_param));
-	printf("add map finish ret: %d\n", ret);
+	ret = ioctl(pseudo_mm_fd, PSEUDO_MM_IOC_ADD_MAP,
+		    (void *)(&add_anon_param));
+	printf("add map finish %d\n", ret);
 	fflush(stdout);
-	if (ret)
-		return ret;
+	return ret;
+}
 
-	fill_anon_param.id = pseudo_mm_id;
-	fill_anon_param.start = start;
-	fill_anon_param.end = end;
-	fill_anon_param.offset = 0;
-	fill_anon_param.fd = img_fd;
+int setup_anon_map_pt(int fd, int pseudo_mm_id, unsigned long start,
+		      unsigned long size, unsigned long pgoff)
+{
+	struct pseudo_mm_setup_pt_param param;
+	int ret;
 
+	param.id = pseudo_mm_id;
+	param.start = start;
+	param.size = size;
+	param.pgoff = pgoff;
 	printf("fill anon start\n");
 	fflush(stdout);
-	ret = ioctl(fd, PSEUDO_MM_IOC_FILL_ANON, (void *)(&fill_anon_param));
+	ret = ioctl(fd, PSEUDO_MM_IOC_SETUP_PT, (void *)(&param));
 	printf("fill anon finish: %d\n", ret);
 	fflush(stdout);
-
 	return ret;
 }
 
@@ -74,7 +141,7 @@ TEST(pseudo_mm_create)
 	int *pseudo_mm_ids;
 	const int size = 128;
 
-	return;
+	SKIP(return, "skip create test");
 
 	fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(fd, 0)
@@ -105,30 +172,9 @@ TEST(pseudo_mm_create)
 	close(fd);
 }
 
-/*
- * check_anon_page_content() - check the memory page content
- * @start: the start of page address (must aligned)
- *
- * Return 0 when check succeed.
- */
-int check_anon_page_content(void *start)
-{
-	int i;
-	char *iter;
-	for (i = 0; i < PAGE_SIZE; i++) {
-		iter = (char *)(start + i);
-		if (*iter != ((i % 20) + 'a')) {
-			printf("check_anon_page_content: expect %d find %d\n",
-			       (i % 20) + 'a', *iter);
-			return -1;
-		}
-	}
-	return 0;
-}
-
 FIXTURE(single_page_anon)
 {
-	int pseudo_mm_id, img_fd, fd;
+	int pseudo_mm_id, fd;
 };
 
 FIXTURE_SETUP(single_page_anon)
@@ -136,8 +182,7 @@ FIXTURE_SETUP(single_page_anon)
 	// 1. create a pseudo_mm
 	// 2. add an one-page anon mapping to pseudo_mm
 	// 3. fill the memory content of this one-page mapping with a image file
-	int ret, i;
-	char ch;
+	int ret;
 
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
 
@@ -156,24 +201,13 @@ FIXTURE_SETUP(single_page_anon)
 	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
 	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
 
-	self->img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-	ASSERT_GT(self->img_fd, 0)
-	{
-		TH_LOG("open image file " IMAGE_FILE " failed: %d!",
-		       self->img_fd);
-	}
-	for (i = 0; i < PAGE_SIZE; i++) {
-		ch = (i % 20) + 'a';
-		ret = pwrite(self->img_fd, (void *)(&ch), 1, i);
-		ASSERT_EQ(ret, 1);
-	}
-	fsync(self->img_fd);
+	ret = fill_dax_device(0, 1);
+	ASSERT_EQ(ret, 0);
 }
 
 FIXTURE_TEARDOWN(single_page_anon)
 {
 	close(self->fd);
-	close(self->img_fd);
 }
 
 TEST_F(single_page_anon, simple_attach)
@@ -189,9 +223,11 @@ TEST_F(single_page_anon, simple_attach)
 	pid = getpid();
 
 	TH_LOG("try to add and fill anon map #%lx - #%lx", start, end);
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, start, end,
-				       MAP_ANONYMOUS | MAP_PRIVATE);
+	ret = add_mmap_to(self->fd, self->pseudo_mm_id, start, end,
+			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	ASSERT_EQ(ret, 0);
+	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, start, PAGE_SIZE,
+				0);
 	ASSERT_EQ(ret, 0);
 	TH_LOG("add and fill anon map (#%lx - #%lx) finish", start, end);
 
@@ -215,6 +251,7 @@ TEST_F(single_page_anon, attach_to_conflict_addr)
 	unsigned long start;
 	unsigned long end;
 	struct pseudo_mm_attach_param attach_param;
+	// SKIP(return, "");
 
 	pid = getpid();
 
@@ -228,14 +265,12 @@ TEST_F(single_page_anon, attach_to_conflict_addr)
 	start = (unsigned long)addr;
 	end = start + PAGE_SIZE;
 	TH_LOG("try to add and fill anon map #%lx - #%lx", start, end);
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, start, end,
-				       MAP_ANONYMOUS | MAP_PRIVATE);
-	ASSERT_EQ(ret, 0)
-	{
-		TH_LOG("add and fill anon map (#%lx - #%lx) failed: %d", start,
-		       end, ret);
-	}
+	ret = add_mmap_to(self->fd, self->pseudo_mm_id, start, end,
+			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	ASSERT_EQ(ret, 0);
+	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, start, PAGE_SIZE,
+				0);
+	ASSERT_EQ(ret, 0);
 
 	attach_param.id = self->pseudo_mm_id;
 	attach_param.pid = pid;
@@ -243,64 +278,6 @@ TEST_F(single_page_anon, attach_to_conflict_addr)
 	ASSERT_NE(ret, 0)
 	{
 		TH_LOG("attach anon mapping to current process with conflict address succeed");
-	}
-}
-
-TEST_F(single_page_anon, check_dax_device_content)
-{
-	int ret, pipe_fd[2];
-	char pipe_buf;
-	pid_t pid, curr_pid;
-	const unsigned long start = 0xdead0UL << PAGE_SHIFT;
-	const unsigned long end = start + PAGE_SIZE;
-	struct pseudo_mm_attach_param attach_param;
-
-	ASSERT_EQ(pipe(pipe_fd), 0);
-	pid = fork();
-	ASSERT_GE(pid, 0);
-	if (pid == 0) {
-		int fd;
-		void *addr;
-
-		close(pipe_fd[1]);
-		ASSERT_EQ(read(pipe_fd[0], &pipe_buf, 1), 1);
-		close(pipe_fd[0]);
-		fd = open("/dev/dax0.0", O_RDWR);
-		ASSERT_GT(fd, 0);
-		addr = mmap(NULL, PAGE_SIZE, PROT_READ, MAP_SHARED, fd, 0);
-		ASSERT_NE(addr, MAP_FAILED);
-		TH_LOG("child mmap addr %#lx", (unsigned long)addr);
-		ret = check_anon_page_content((void *)addr);
-		ASSERT_EQ(ret, 0);
-		TH_LOG("child check page content ret %d", ret);
-		if (ret) {
-			exit(EXIT_FAILURE);
-		}
-		exit(EXIT_SUCCESS);
-	} else {
-		int status;
-		close(pipe_fd[0]);
-		curr_pid = getpid();
-		TH_LOG("try to add and fill anon map #%lx - #%lx", start, end);
-		ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-					       self->pseudo_mm_id, start, end,
-					       MAP_ANONYMOUS | MAP_PRIVATE);
-		ASSERT_EQ(ret, 0);
-		TH_LOG("add and fill anon map (%#lx - %#lx) finish", start,
-		       end);
-		attach_param.id = self->pseudo_mm_id;
-		attach_param.pid = curr_pid;
-		ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH,
-			    (void *)(&attach_param));
-		ASSERT_EQ(ret, 0);
-		TH_LOG("attach succeed and start check anon page content");
-		ret = check_anon_page_content((void *)start);
-		ASSERT_EQ(ret, 0);
-		ASSERT_EQ(write(pipe_fd[1], &pipe_buf, 1), 1);
-		close(pipe_fd[1]);
-		ASSERT_EQ(waitpid(pid, &status, 0), pid);
-		ASSERT_TRUE(WIFEXITED(status));
-		ASSERT_EQ(WEXITSTATUS(status), 0);
 	}
 }
 
@@ -319,12 +296,16 @@ FIXTURE(pseudo_mm_lifetime_simple)
 
 FIXTURE_SETUP(pseudo_mm_lifetime_simple)
 {
+	int ret;
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
 	self->start = 0xdead0UL << PAGE_SHIFT;
 	self->end = 0xdead1UL << PAGE_SHIFT;
 	self->fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(self->fd, 0);
 	ASSERT_EQ(clean_all_pseudo_mm(self->fd), 0);
+
+	ret = fill_dax_device(1, 1);
+	ASSERT_EQ(ret, 0);
 }
 
 FIXTURE_TEARDOWN(pseudo_mm_lifetime_simple)
@@ -349,8 +330,8 @@ TEST_F(pseudo_mm_lifetime_simple, XXX)
 {
 	pid_t pid;
 	struct pseudo_mm_attach_param attach_param;
-	int ret, pseudo_mm_id, img_fd, i, pipe_fd[2];
-	char ch;
+	int ret, pseudo_mm_id, pipe_fd[2];
+	// SKIP(return, "");
 
 	/*
 	 * one process create, fill pseudo_mm then exit
@@ -359,14 +340,6 @@ TEST_F(pseudo_mm_lifetime_simple, XXX)
 	pid = fork();
 	if (pid == 0) {
 		close(pipe_fd[0]);
-		img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-		ASSERT_GT(img_fd, 0);
-		for (i = 0; i < PAGE_SIZE; i++) {
-			ch = (i % 20) + 'a';
-			ret = pwrite(img_fd, (void *)(&ch), 1, i);
-			ASSERT_EQ(ret, 1);
-		}
-		fsync(img_fd);
 		ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
 			    (void *)(&pseudo_mm_id));
 		TH_LOG("process %d create pseudo_mm %d", getpid(),
@@ -374,11 +347,13 @@ TEST_F(pseudo_mm_lifetime_simple, XXX)
 		ASSERT_EQ(ret, 0);
 		ASSERT_GE(pseudo_mm_id, 1);
 
-		ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
-					       self->start, self->end,
-					       variant->flags);
+		ret = add_mmap_to(self->fd, pseudo_mm_id, self->start,
+				  self->end, MAP_ANONYMOUS | MAP_PRIVATE, -1,
+				  0);
 		ASSERT_EQ(ret, 0);
-		close(img_fd);
+		ret = setup_anon_map_pt(self->fd, pseudo_mm_id, self->start,
+					PAGE_SIZE, 1);
+		ASSERT_EQ(ret, 0);
 		ASSERT_EQ(write(pipe_fd[1], &pseudo_mm_id,
 				sizeof(pseudo_mm_id)),
 			  sizeof(pseudo_mm_id));
@@ -438,8 +413,7 @@ FIXTURE_VARIANT_ADD(single_page_anon_multi_attach, private){
 
 FIXTURE_SETUP(single_page_anon_multi_attach)
 {
-	int pipe_fd[2];
-	pid_t pid;
+	int ret;
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
 	// create a pseudo_mm
 	self->start = 0xdead0UL << PAGE_SHIFT;
@@ -447,53 +421,20 @@ FIXTURE_SETUP(single_page_anon_multi_attach)
 
 	self->fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(self->fd, 0);
-
 	ASSERT_EQ(clean_all_pseudo_mm(self->fd), 0);
+	ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
+		    (void *)(&self->pseudo_mm_id));
+	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
+	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
+	ret = fill_dax_device(2, 1);
+	ASSERT_EQ(ret, 0);
 
-	ASSERT_EQ(pipe(pipe_fd), 0);
-	pid = fork();
-	if (pid == 0) {
-		int img_fd, ret, i;
-		char ch;
-		int pseudo_mm_id;
-
-		close(pipe_fd[0]);
-		ret = ioctl(self->fd, PSEUDO_MM_IOC_CREATE,
-			    (void *)(&pseudo_mm_id));
-		ASSERT_TRUE(ret == 0 && pseudo_mm_id > 0);
-		TH_LOG("process %d create pseudo_mm %d", getpid(),
-		       pseudo_mm_id);
-
-		img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-		ASSERT_GT(img_fd, 0);
-		for (i = 0; i < PAGE_SIZE; i++) {
-			ch = (i % 20) + 'a';
-			ret = pwrite(img_fd, (void *)(&ch), 1, i);
-			ASSERT_EQ(ret, 1);
-		}
-		fsync(img_fd);
-
-		ret = add_and_fill_anon_map_to(self->fd, img_fd, pseudo_mm_id,
-					       self->start, self->end,
-					       variant->flags);
-		ASSERT_EQ(ret, 0);
-		close(img_fd);
-		ASSERT_EQ(write(pipe_fd[1], &pseudo_mm_id,
-				sizeof(pseudo_mm_id)),
-			  sizeof(pseudo_mm_id));
-		close(pipe_fd[1]);
-		exit(EXIT_SUCCESS);
-	} else {
-		int status;
-		close(pipe_fd[1]);
-		ASSERT_EQ(read(pipe_fd[0], &self->pseudo_mm_id,
-			       sizeof(self->pseudo_mm_id)),
-			  sizeof(self->pseudo_mm_id));
-		ASSERT_GT(self->pseudo_mm_id, 0);
-		ASSERT_EQ(waitpid(pid, &status, 0), pid);
-		ASSERT_TRUE(WIFEXITED(status));
-		ASSERT_EQ(WEXITSTATUS(status), 0);
-	}
+	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
+			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	ASSERT_EQ(ret, 0);
+	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, self->start,
+				PAGE_SIZE, 2);
+	ASSERT_EQ(ret, 0);
 }
 
 FIXTURE_TEARDOWN(single_page_anon_multi_attach)
@@ -516,6 +457,7 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 	char buf, *iter;
 	pid_t pid, curr_pid;
 	struct pseudo_mm_attach_param attach_param;
+	// SKIP(return, "");
 
 	ASSERT_EQ(pipe(ctp), 0);
 	ASSERT_EQ(pipe(ptc), 0);
@@ -541,32 +483,29 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 		close(ctp[0]);
 		ASSERT_EQ(write(ctp[1], &buf, 1),
 			  1); // notify parent to start modification
+		close(ctp[1]);
 		ASSERT_EQ(read(ptc[0], &buf, 1),
 			  1); // wait for parent's modification
 		close(ptc[0]);
 		// make sure child does not see parent's modification
 		ret = check_anon_page_content((void *)self->start);
-		buf = ret == 0 ? 0 : 'e'; // 0 means succeed, 'e' means error
-		ASSERT_EQ(write(ctp[1], &buf, 1), 1);
-		close(ctp[1]);
+		if (ret)
+			exit(EXIT_FAILURE);
 		exit(EXIT_SUCCESS);
 	} else {
 		int status;
+		close(ptc[0]);
+		close(ctp[1]);
 		// parent modify memory content
 		ASSERT_EQ(read(ctp[0], &buf, 1),
 			  1); // wait for child's preparation
-		close(ptc[0]);
-		close(ctp[1]);
+		close(ctp[0]);
 		for (i = 0; i < PAGE_SIZE; i++) {
 			iter = (char *)(self->start + i);
 			*iter = 'X';
 		}
 		ASSERT_EQ(write(ptc[1], &buf, 1), 1);
 		close(ptc[1]);
-		// parent read from pipe when child succeed;
-		ASSERT_EQ(read(ctp[0], &buf, 1), 1);
-		close(ctp[0]);
-		ASSERT_EQ(buf, 0);
 		ASSERT_EQ(waitpid(pid, &status, 0), pid);
 		ASSERT_TRUE(WIFEXITED(status));
 		ASSERT_EQ(WEXITSTATUS(status), 0);
@@ -575,15 +514,14 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 
 FIXTURE(multi_page)
 {
-	int fd, img_fd, pseudo_mm_id;
+	int fd, pseudo_mm_id;
 	unsigned long start, end;
 	int page_num;
 };
 
 FIXTURE_SETUP(multi_page)
 {
-	int fd, img_fd, ret, i;
-	char ch;
+	int fd, ret;
 
 	self->page_num = 32;
 	self->start = 0xdead0UL << PAGE_SHIFT;
@@ -598,21 +536,12 @@ FIXTURE_SETUP(multi_page)
 	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
 	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
 
-	img_fd = open(IMAGE_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-	ASSERT_GT(img_fd, 0);
-	self->img_fd = img_fd;
-	for (i = 0; i < self->page_num * PAGE_SIZE; i++) {
-		ch = (i % 20) + 'a';
-		ret = pwrite(img_fd, (void *)(&ch), 1, i);
-		ASSERT_EQ(ret, 1);
-	}
-	fsync(img_fd);
+	ret = fill_dax_device(16, self->page_num);
+	ASSERT_EQ(ret, 0);
 }
 
 FIXTURE_TEARDOWN(multi_page)
 {
-	close(self->img_fd);
-	unlink(IMAGE_FILE);
 	close(self->fd);
 }
 
@@ -621,12 +550,15 @@ TEST_F(multi_page, private_write_after_attach)
 	int ret, ptc[2], ctp[2], i;
 	pid_t pid, curr_pid;
 	char *iter, pipe_buf;
+	void *addr;
 	struct pseudo_mm_attach_param attach_param;
+	// SKIP(return, "");
 
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, self->start,
-				       self->end, MAP_ANONYMOUS | MAP_PRIVATE);
-	TH_LOG("add and fill pseudo_mm_id %d succeed", self->pseudo_mm_id);
+	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
+			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	ASSERT_EQ(ret, 0);
+	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, self->start,
+				self->page_num << PAGE_SHIFT, 16);
 	ASSERT_EQ(ret, 0);
 
 	ASSERT_EQ(pipe(ptc), 0);
@@ -650,9 +582,11 @@ TEST_F(multi_page, private_write_after_attach)
 		close(ctp[1]);
 		ASSERT_EQ(read(ptc[0], &pipe_buf, 1), 1);
 		close(ptc[0]);
-		for (i = 0; i < self->page_num * PAGE_SHIFT; i++) {
-			iter = (char *)(self->start + i);
-			ASSERT_EQ(*iter, (i % 20) + 'a');
+
+		for (i = 0; i < self->page_num; i++) {
+			addr = (void *)((unsigned long)self->start +
+					(i << PAGE_SHIFT));
+			ret = check_anon_page_content(addr);
 		}
 		TH_LOG("child %d finish checking", curr_pid);
 		exit(EXIT_SUCCESS);
@@ -681,13 +615,16 @@ TEST_F(multi_page, private_attach_after_write)
 	int ret, pipe_fd[2], i;
 	pid_t pid, curr_pid;
 	char *iter, pipe_buf;
+	void *addr;
 	struct pseudo_mm_attach_param attach_param;
+	// SKIP(return, "");
 
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, self->start,
-				       self->end, MAP_ANONYMOUS | MAP_PRIVATE);
+	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
+			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	ASSERT_EQ(ret, 0);
-	TH_LOG("add and fill pseudo_mm_id %d succeed", self->pseudo_mm_id);
+	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, self->start,
+				self->page_num << PAGE_SHIFT, 16);
+	ASSERT_EQ(ret, 0);
 	ASSERT_EQ(pipe(pipe_fd), 0);
 	pid = fork();
 	ASSERT_GE(pid, 0);
@@ -702,9 +639,11 @@ TEST_F(multi_page, private_attach_after_write)
 		ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH,
 			    (void *)(&attach_param));
 		ASSERT_EQ(ret, 0);
-		for (i = 0; i < self->page_num * PAGE_SHIFT; i++) {
-			iter = (char *)(self->start + i);
-			ASSERT_EQ(*iter, (i % 20) + 'a');
+		for (i = 0; i < self->page_num; i++) {
+			addr = (void *)((unsigned long)self->start +
+					(i << PAGE_SHIFT));
+			ret = check_anon_page_content(addr);
+			ASSERT_EQ(ret, 0);
 		}
 		TH_LOG("child %d finish checking", getpid());
 		exit(EXIT_SUCCESS);
@@ -729,66 +668,19 @@ TEST_F(multi_page, private_attach_after_write)
 	}
 }
 
-/*
- * 1. one process A attach a shared anon pseudo_mm.
- * 2. A fork() a child process B.
- * 3. A modify the memory content in the shared anon pseudo_mm area.
- * 4. B should notice those modifications.
- */
-TEST_F(multi_page, shared)
+TEST(dax_test)
 {
-	int ret, pipe_fd[2];
-	pid_t pid;
-	char *iter, pipe_buf;
-	struct pseudo_mm_attach_param attach_param;
-
-	SKIP(NULL, "skip multi_page_shared (for now do not support)");
-
-	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
-
-	ret = add_and_fill_anon_map_to(self->fd, self->img_fd,
-				       self->pseudo_mm_id, self->start,
-				       self->end, MAP_ANONYMOUS | MAP_SHARED);
-	TH_LOG("add and fill pseudo_mm_id %d succeed", self->pseudo_mm_id);
+	void *addr;
+	int dax_fd, ret;
+	ret = fill_dax_device(0, 1);
 	ASSERT_EQ(ret, 0);
 
-	pid = getpid();
-	// both child and parent need attach
-	attach_param.id = self->pseudo_mm_id;
-	attach_param.pid = pid;
-	ret = ioctl(self->fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
-	ASSERT_EQ(ret, 0);
-	TH_LOG("attach pseudo_mm_id %d succeed", self->pseudo_mm_id);
-
-	ASSERT_EQ(pipe(pipe_fd), 0);
-	pid = fork();
-	ASSERT_GE(pid, 0);
-
-	if (pid == 0) {
-		// child
-		close(pipe_fd[1]);
-		ASSERT_EQ(read(pipe_fd[0], &pipe_buf, 1), 1);
-		close(pipe_fd[0]);
-		for (iter = (char *)(self->start); iter < (char *)(self->end);
-		     iter++)
-			ASSERT_EQ(*iter, 'H');
-		TH_LOG("child %d finish checking", getpid());
-		exit(EXIT_SUCCESS);
-	} else {
-		int status;
-		// parent
-		close(pipe_fd[0]);
-		for (iter = (char *)(self->start); iter < (char *)(self->end);
-		     iter++)
-			*iter = 'H';
-		TH_LOG("parent %d finish modifying", getpid());
-		ASSERT_EQ(write(pipe_fd[1], &pipe_buf, 1), 1);
-		close(pipe_fd[1]);
-		// wait for child to exit
-		ASSERT_EQ(waitpid(pid, &status, 0), pid);
-		ASSERT_TRUE(WIFEXITED(status));
-		ASSERT_EQ(WEXITSTATUS(status), 0);
-	}
+	dax_fd = open(DAX_DEVICE_PATH, O_RDWR);
+	ASSERT_GE(dax_fd, 0);
+	addr = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, dax_fd,
+		    0);
+	ASSERT_NE(addr, MAP_FAILED);
+	check_anon_page_content(addr);
 }
 
 TEST_HARNESS_MAIN

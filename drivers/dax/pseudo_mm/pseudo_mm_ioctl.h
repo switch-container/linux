@@ -13,15 +13,18 @@ struct pseudo_mm_add_map_param {
 	unsigned long prot;
 	unsigned long flags;
 	int fd;
-	off_t pgoff;
+	/* offset should be multiply of PAGE_SIZE (same as mmap) */
+	off_t offset;
 };
 
-struct pseudo_mm_fill_anon_param {
+struct pseudo_mm_setup_pt_param {
 	int id;
+	/* start virtual address */
 	unsigned long start;
-	unsigned long end;
-	int fd; // file descriptor of memory image file
-	off_t offset;	// offset within the image file
+	/* size of memory area needed to be setup */
+	unsigned long size;
+	/* page offset in dax device (e.g., 1 means 1 * PAGE_SIZE) */
+	unsigned long pgoff;
 };
 
 struct pseudo_mm_attach_param {
@@ -37,8 +40,8 @@ struct pseudo_mm_attach_param {
 #define PSEUDO_MM_IOC_DELETE _IOW(PSEUDO_MM_IOC_MAGIC, 0x02, int *)
 #define PSEUDO_MM_IOC_ADD_MAP \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x03, struct pseudo_mm_add_anon_param *)
-#define PSEUDO_MM_IOC_FILL_ANON \
-	_IOW(PSEUDO_MM_IOC_MAGIC, 0x04, struct pseudo_mm_fill_anon_param *)
+#define PSEUDO_MM_IOC_SETUP_PT \
+	_IOW(PSEUDO_MM_IOC_MAGIC, 0x04, struct pseudo_mm_setup_pt_param *)
 #define PSEUDO_MM_IOC_ATTACH \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x05, struct pseudo_mm_attach_param *)
 

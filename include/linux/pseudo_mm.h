@@ -29,12 +29,7 @@ struct pseudo_mm_unmap_args {
 
 struct pseudo_mm_backend {
 	struct file *filp;
-	pgoff_t allocated_pg; /* number of page that has already been allocated */
-	spinlock_t lock;
 };
-
-struct page *pseudo_mm_alloc_page(void);
-pte_t pseudo_mm_page_to_pte(struct page *, struct vm_fault *);
 
 /* return 0 if succeed */
 unsigned long register_backend_dax_device(int fd);
@@ -57,6 +52,8 @@ void put_pseudo_mm_with_id(int id);
 /*
  * Add a memory mapping to this pseudo_mm.
  * This will not fill content of the physical page.
+ * Support file-backed mapping and anonymous private mapping.
+ * (Do not support anonymous shared mapping for now.)
  *
  * The meaning of params is the same as mmap()
  */
@@ -65,24 +62,21 @@ unsigned long pseudo_mm_add_map(int id, unsigned long start, unsigned long size,
 				pgoff_t pgoff);
 
 /*
- * pseudo_mm_fill_anon_map() - Fill the memory content of the vma
- * @id: id of the target pseudo_mm
- * @start: start address of the anon vma
- * @size: length of the anon vma
- * @content: the memory image file
- * @offset: offset within the image file corresponding to the vma (start at
- * @start)
+ * pseudo_mm_setup_pt() - setup page table of pseudo_mm's virtual address
+ * @id: pseudo_mm id
+ * @start: start address
+ * @size: size of continuous virtual address
+ * @pgoff: physical page offset of backend dax device (page number)
+ *
+ * This function will establish the page table of virtual address range
+ * [start, start + size) and let it point to physical page start at pgoff
+ * in backend dax device (the page table is read-only).
+ *
+ * *Note*: The [start, start + size) should not exceed the boundary of single
+ * vma. Return 0 when succeed.
  */
-unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
-				      unsigned long size, struct file *content,
-				      off_t offset);
-
-/*
- * Add an file-backed memory mapping to this pseudo_mm.
- * TODO (huang-jl): how to design an API, what arguments this method need?
- */
-unsigned long pseudo_mm_add_file_map(int id, unsigned long start,
-				     unsigned long size);
+unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
+				 unsigned long size, pgoff_t pgoff);
 
 /*
  * pseudo_mm_attach() - insert *all* memory mapping into an existing process's address space
@@ -96,6 +90,13 @@ void debug_weird_page(struct page *page, int expected_mapcount);
 
 static inline bool vma_is_pseudo_mm_master(struct vm_area_struct *vma)
 {
-	return !!(vma->pseudo_mm_flag & PSEUDO_MM_VMA_MASTER);
+	return (vma->pseudo_mm_flag & (PSEUDO_MM_VMA_MASTER | PSEUDO_MM_VMA)) ==
+	       (PSEUDO_MM_VMA_MASTER | PSEUDO_MM_VMA);
 }
+
+static inline bool vma_is_pseudo_mm(struct vm_area_struct *vma)
+{
+	return !!(vma->pseudo_mm_flag & PSEUDO_MM_VMA);
+}
+
 #endif

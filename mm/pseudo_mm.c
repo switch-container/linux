@@ -69,44 +69,6 @@ void __maybe_unused debug_weird_page(struct page *page, int expected_mapcount)
 }
 #endif
 
-/*
- * fill_page_from_file() - fill the content of the physical page from image file
- * @page: struct page of target
- * @file: image file
- * @offset: the offset to read data started from
- *
- * return 0 if success
- */
-static unsigned long fill_page_from_file(struct page *page, struct file *file,
-					 loff_t offset)
-{
-	void *buf;
-	loff_t pos;
-	ssize_t filled_size, wanted, ret;
-
-	// TODO (huang-jl) deny_write_access ?
-	buf = page_address(page);
-	pos = offset;
-	filled_size = 0;
-	while (filled_size < PAGE_SIZE) {
-		wanted = PAGE_SIZE - filled_size;
-		ret = kernel_read(file, buf + filled_size, wanted, &pos);
-		if (ret < 0) {
-			pr_warn("fill a page (kernel_read) failed\n");
-			return ret;
-		}
-		if (ret == 0)
-			break;
-		filled_size += ret;
-	}
-	if (filled_size != PAGE_SIZE) {
-		pr_warn("fill a page with only %ld bytes\n", filled_size);
-		return -EIO;
-	}
-
-	return 0;
-}
-
 int __init pseudo_mm_cache_init(void)
 {
 	pseudo_mm_cachep = KMEM_CACHE(pseudo_mm, SLAB_PANIC | SLAB_ACCOUNT);
@@ -132,8 +94,6 @@ unsigned long register_backend_dax_device(int fd)
 		goto err;
 	}
 	backend.filp = backend_file;
-	backend.allocated_pg = 0;
-	spin_lock_init(&backend.lock);
 
 	return 0;
 err:
@@ -256,6 +216,12 @@ unsigned long pseudo_mm_add_map(int id, unsigned long start, unsigned long size,
 	if (flags & MAP_HUGETLB)
 		return -EINVAL;
 
+	if ((flags & (MAP_ANONYMOUS | MAP_SHARED)) ==
+	    (MAP_ANONYMOUS | MAP_SHARED)) {
+		pr_warn("do not support anonymous shared mapping!\n");
+		return -EINVAL;
+	}
+
 	if ((flags & MAP_ANONYMOUS) && fd != -1)
 		return -EINVAL;
 
@@ -288,114 +254,6 @@ unsigned long pseudo_mm_add_map(int id, unsigned long start, unsigned long size,
 out:
 	if (file)
 		fput(file);
-	return ret;
-}
-
-unsigned long pseudo_mm_fill_anon_map(int id, unsigned long start,
-				      unsigned long size, struct file *image,
-				      off_t offset)
-{
-	struct pseudo_mm *pseudo_mm;
-	struct mm_struct *mm;
-	struct vm_area_struct *vma;
-	struct pseudo_mm_pin_pages *pin_page = NULL;
-	struct page **pages;
-	unsigned long gup_flags, ret;
-	int nr_pages, i;
-	long nr_pin_pages;
-
-	// we only accept PageAligned address and size
-	if (!PAGE_ALIGNED(start) || !PAGE_ALIGNED(size) || size == 0) {
-		return -EINVAL;
-	}
-	pseudo_mm = find_pseudo_mm(id);
-	if (!pseudo_mm)
-		return -ENOENT;
-	mm = pseudo_mm->mm;
-	vma = find_vma(mm, start);
-	if (!vma || vma->vm_start != start || vma->vm_end != (start + size)) {
-		pr_warn("fill area (#%lx - #%lx) does not match any vma\n",
-			start, start + size);
-		return -ENOENT;
-	}
-
-	// TODO (huang-jl) how to distinguish file-backed mapping from
-	// anonymous shared mapping ?
-	//
-	// There are 2 cases where vma_is_anonymous() return false:
-	// 1. file-backed mapping (obviously)
-	// 2. anon and shared mapping (which points to a specical
-	// unlinked file /dev/zero)
-	//
-	// because of case 2, we do not use vma_is_anonymous() here
-	if (!vma_is_anonymous(vma) && !vma_is_pseudo_anon_shared(vma)) {
-		pr_warn("vma at (#%lx - #%lx) is not anonymous\n", start,
-			start + size);
-		return -EINVAL;
-	}
-
-	// if (vma->vm_file)
-	// 	pr_info("pseudo_mm vm_file's mapping = #%p\n", vma->vm_file->f_mapping);
-
-	nr_pages = size >> PAGE_SHIFT;
-	// we are going to fill the content of this page
-	gup_flags = FOLL_WRITE | FOLL_TOUCH | FOLL_FORCE | FOLL_LONGTERM;
-	pages = kvmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
-	if (!pages)
-		return -ENOMEM;
-
-	// TODO (huang-jl) try to pin these pages in memory (which is read-only).
-	// In case of swapping out or raising PF when access it.
-	nr_pin_pages =
-		pin_user_pages_of(mm, start, nr_pages, gup_flags, pages, NULL);
-	if (nr_pin_pages != nr_pages) {
-		ret = nr_pin_pages < 0 ? nr_pin_pages : -ENOMEM;
-		goto failed;
-	}
-#ifdef PSEUDO_MM_DEBUG
-	if (vma_is_anonymous(vma)) {
-		for (i = 0; i < nr_pin_pages; i++) {
-			pr_info("pin pages idx %d: %#lx\n", i,
-				(unsigned long)pages[i]);
-			if (i > 0 && (pages[i - 1] + 1) != pages[i]) {
-				pr_warn("page %d vs %d not continuous\n", i - 1,
-					i);
-				ret = -EFAULT;
-				goto failed;
-			}
-		}
-	}
-#endif
-	for (i = 0; i < nr_pages; i++) {
-		// pr_info("process %d before fill page in vma %p (%d / %d) %p mapcount = %d refcount = %d\n",
-		// 	current->pid, vma, i, nr_pages, pages[i],
-		// 	page_mapcount(pages[i]), page_ref_count(pages[i]));
-		// debug_weird_page(pages[i], 1);
-		ret = fill_page_from_file(pages[i], image,
-					  offset + i * PAGE_SIZE);
-		if (ret) {
-			ret = -EIO;
-			goto failed;
-		}
-	}
-
-	pin_page = kmalloc(sizeof(*pin_page), GFP_KERNEL);
-	if (!pin_page) {
-		ret = -ENOMEM;
-		goto failed;
-	}
-	INIT_LIST_HEAD(&pin_page->list);
-	pin_page->pages = pages;
-	pin_page->nr_pin_pages = nr_pin_pages;
-	list_add(&pin_page->list, &pseudo_mm->pages_list);
-	return 0;
-
-failed:
-	if (nr_pin_pages > 0)
-		unpin_user_pages(pages, nr_pin_pages);
-	kvfree(pages);
-	if (pin_page)
-		kfree(pin_page);
 	return ret;
 }
 
