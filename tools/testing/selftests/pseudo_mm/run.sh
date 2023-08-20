@@ -16,5 +16,6 @@ test_for() {
 
 test_for "./anon_only"
 test_for "./file_only"
+test_for "./mix"
 
 exit 0

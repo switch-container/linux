@@ -10,121 +10,13 @@
 
 #include "../kselftest_harness.h"
 #include "pseudo_mm_ioctl.h"
+#include "common.h"
 
 #define DEVICE_PATH "/dev/pseudo_mm"
 #define DAX_DEVICE_PATH "/dev/dax0.0"
 #define IMAGE_FILE "one-page.img"
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1 << PAGE_SHIFT)
-
-void fill_single_page(void *start)
-{
-	int i;
-	char *iter;
-	for (i = 0; i < PAGE_SIZE; i++) {
-		iter = (char *)(start) + i;
-		*iter = (i % 30) + 'a';
-	}
-}
-
-int check_anon_page_content(void *start)
-{
-	int i;
-	char *iter;
-	for (i = 0; i < PAGE_SIZE; i++) {
-		iter = (char *)(start + i);
-		if (*iter != ((i % 30) + 'a')) {
-			printf("check_anon_page_content: expect %d at address %#lx find %d\n",
-			       (i % 30) + 'a', (unsigned long)iter, *iter);
-			return -1;
-		}
-	}
-	return 0;
-}
-
-int __fill_dax_device(unsigned long pgoff, unsigned long nr_pages)
-{
-	int i, dax_fd;
-	void *addr;
-	dax_fd = open(DAX_DEVICE_PATH, O_RDWR);
-	if (dax_fd < 0)
-		return -1;
-	addr = mmap(NULL, nr_pages << PAGE_SHIFT, PROT_READ | PROT_WRITE,
-		    MAP_SHARED, dax_fd, pgoff << PAGE_SHIFT);
-	if (!addr)
-		return -1;
-	for (i = 0; i < nr_pages; i++) {
-		fill_single_page(addr + i * PAGE_SIZE);
-	}
-	close(dax_fd);
-	return 0;
-}
-
-int fill_dax_device(unsigned long pgoff, unsigned long nr_pages)
-{
-	pid_t pid;
-
-	pid = fork();
-	if (pid < 0)
-		return -1;
-
-	if (pid == 0) {
-		int ret;
-		ret = __fill_dax_device(pgoff, nr_pages);
-		if (ret != 0)
-			exit(EXIT_FAILURE);
-		exit(EXIT_SUCCESS);
-	} else {
-		int status;
-		if (waitpid(pid, &status, 0) != pid)
-			return -1;
-		if (!WIFEXITED(status))
-			return -1;
-		if (WEXITSTATUS(status) != 0)
-			return -1;
-	}
-	return 0;
-}
-
-int add_mmap_to(int pseudo_mm_fd, int pseudo_mm_id, unsigned long start,
-		unsigned long end, unsigned long flags, int fd, off_t offset)
-{
-	struct pseudo_mm_add_map_param add_anon_param;
-	int ret;
-
-	add_anon_param.id = pseudo_mm_id;
-	add_anon_param.start = start;
-	add_anon_param.end = end;
-	add_anon_param.prot = PROT_READ | PROT_WRITE;
-	add_anon_param.flags = flags;
-	add_anon_param.fd = fd;
-	add_anon_param.offset = offset;
-	printf("add map start\n");
-	fflush(stdout);
-	ret = ioctl(pseudo_mm_fd, PSEUDO_MM_IOC_ADD_MAP,
-		    (void *)(&add_anon_param));
-	printf("add map finish %d\n", ret);
-	fflush(stdout);
-	return ret;
-}
-
-int setup_anon_map_pt(int fd, int pseudo_mm_id, unsigned long start,
-		      unsigned long size, unsigned long pgoff)
-{
-	struct pseudo_mm_setup_pt_param param;
-	int ret;
-
-	param.id = pseudo_mm_id;
-	param.start = start;
-	param.size = size;
-	param.pgoff = pgoff;
-	printf("fill anon start\n");
-	fflush(stdout);
-	ret = ioctl(fd, PSEUDO_MM_IOC_SETUP_PT, (void *)(&param));
-	printf("fill anon finish: %d\n", ret);
-	fflush(stdout);
-	return ret;
-}
 
 /*
  * @fd: the fd of pseudo_mm device
@@ -175,6 +67,7 @@ TEST(pseudo_mm_create)
 FIXTURE(single_page_anon)
 {
 	int pseudo_mm_id, fd;
+	unsigned long seed;
 };
 
 FIXTURE_SETUP(single_page_anon)
@@ -186,6 +79,7 @@ FIXTURE_SETUP(single_page_anon)
 
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
 
+	self->seed = 0x123123;
 	self->fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(self->fd, 0)
 	{
@@ -201,7 +95,7 @@ FIXTURE_SETUP(single_page_anon)
 	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
 	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
 
-	ret = fill_dax_device(0, 1);
+	ret = fill_dax_device(192, 1, self->seed);
 	ASSERT_EQ(ret, 0);
 }
 
@@ -227,7 +121,7 @@ TEST_F(single_page_anon, simple_attach)
 			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	ASSERT_EQ(ret, 0);
 	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, start, PAGE_SIZE,
-				0);
+				192);
 	ASSERT_EQ(ret, 0);
 	TH_LOG("add and fill anon map (#%lx - #%lx) finish", start, end);
 
@@ -237,7 +131,7 @@ TEST_F(single_page_anon, simple_attach)
 	ASSERT_EQ(ret, 0);
 
 	TH_LOG("attach succeed and start check anon page content");
-	ret = check_anon_page_content((void *)start);
+	ret = check_page_content((void *)start, self->seed);
 	ASSERT_EQ(ret, 0);
 
 	TH_LOG("succeed to attach pseudo_mm to current process and check its content.");
@@ -292,19 +186,21 @@ FIXTURE(pseudo_mm_lifetime_simple)
 {
 	int fd;
 	unsigned long start, end;
+	unsigned long seed;
 };
 
 FIXTURE_SETUP(pseudo_mm_lifetime_simple)
 {
 	int ret;
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
+	self->seed = 0x321321;
 	self->start = 0xdead0UL << PAGE_SHIFT;
 	self->end = 0xdead1UL << PAGE_SHIFT;
 	self->fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(self->fd, 0);
 	ASSERT_EQ(clean_all_pseudo_mm(self->fd), 0);
 
-	ret = fill_dax_device(1, 1);
+	ret = fill_dax_device(1, 1, self->seed);
 	ASSERT_EQ(ret, 0);
 }
 
@@ -316,6 +212,7 @@ FIXTURE_TEARDOWN(pseudo_mm_lifetime_simple)
 FIXTURE_VARIANT(pseudo_mm_lifetime_simple)
 {
 	unsigned long flags;
+	unsigned long seed;
 };
 
 FIXTURE_VARIANT_ADD(pseudo_mm_lifetime_simple, private){
@@ -381,7 +278,7 @@ TEST_F(pseudo_mm_lifetime_simple, XXX)
 		TH_LOG("pid %d pseudo_mm_id %d", pid, pseudo_mm_id);
 	}
 
-	ret = check_anon_page_content((void *)self->start);
+	ret = check_page_content((void *)self->start, self->seed);
 	ASSERT_EQ(ret, 0);
 }
 
@@ -396,6 +293,7 @@ FIXTURE(single_page_anon_multi_attach)
 {
 	int fd, pseudo_mm_id;
 	unsigned long start, end;
+	unsigned long seed;
 };
 
 FIXTURE_VARIANT(single_page_anon_multi_attach)
@@ -415,7 +313,7 @@ FIXTURE_SETUP(single_page_anon_multi_attach)
 {
 	int ret;
 	TH_LOG("test start pid %d ppid %d", getpid(), getppid());
-	// create a pseudo_mm
+	self->seed = 0x456456;
 	self->start = 0xdead0UL << PAGE_SHIFT;
 	self->end = 0xdead1UL << PAGE_SHIFT;
 
@@ -426,7 +324,7 @@ FIXTURE_SETUP(single_page_anon_multi_attach)
 		    (void *)(&self->pseudo_mm_id));
 	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
 	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
-	ret = fill_dax_device(2, 1);
+	ret = fill_dax_device(2, 1, self->seed);
 	ASSERT_EQ(ret, 0);
 
 	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
@@ -474,7 +372,7 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 		       curr_pid, errno);
 	}
 
-	ret = check_anon_page_content((void *)self->start);
+	ret = check_page_content((void *)self->start, self->seed);
 	ASSERT_EQ(ret, 0);
 
 	if (pid == 0) {
@@ -488,7 +386,7 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 			  1); // wait for parent's modification
 		close(ptc[0]);
 		// make sure child does not see parent's modification
-		ret = check_anon_page_content((void *)self->start);
+		ret = check_page_content((void *)self->start, self->seed);
 		if (ret)
 			exit(EXIT_FAILURE);
 		exit(EXIT_SUCCESS);
@@ -517,12 +415,14 @@ FIXTURE(multi_page)
 	int fd, pseudo_mm_id;
 	unsigned long start, end;
 	int page_num;
+	unsigned long seed;
 };
 
 FIXTURE_SETUP(multi_page)
 {
 	int fd, ret;
 
+	self->seed = 0x654654;
 	self->page_num = 32;
 	self->start = 0xdead0UL << PAGE_SHIFT;
 	self->end = self->start + (self->page_num << PAGE_SHIFT);
@@ -536,7 +436,7 @@ FIXTURE_SETUP(multi_page)
 	ASSERT_TRUE(ret == 0 && self->pseudo_mm_id > 0);
 	TH_LOG("process %d create pseudo_mm %d", getpid(), self->pseudo_mm_id);
 
-	ret = fill_dax_device(16, self->page_num);
+	ret = fill_dax_device(37, self->page_num, self->seed);
 	ASSERT_EQ(ret, 0);
 }
 
@@ -558,7 +458,7 @@ TEST_F(multi_page, private_write_after_attach)
 			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	ASSERT_EQ(ret, 0);
 	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, self->start,
-				self->page_num << PAGE_SHIFT, 16);
+				self->page_num << PAGE_SHIFT, 37);
 	ASSERT_EQ(ret, 0);
 
 	ASSERT_EQ(pipe(ptc), 0);
@@ -586,7 +486,7 @@ TEST_F(multi_page, private_write_after_attach)
 		for (i = 0; i < self->page_num; i++) {
 			addr = (void *)((unsigned long)self->start +
 					(i << PAGE_SHIFT));
-			ret = check_anon_page_content(addr);
+			ret = check_page_content(addr, self->seed);
 		}
 		TH_LOG("child %d finish checking", curr_pid);
 		exit(EXIT_SUCCESS);
@@ -623,7 +523,7 @@ TEST_F(multi_page, private_attach_after_write)
 			  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	ASSERT_EQ(ret, 0);
 	ret = setup_anon_map_pt(self->fd, self->pseudo_mm_id, self->start,
-				self->page_num << PAGE_SHIFT, 16);
+				self->page_num << PAGE_SHIFT, 37);
 	ASSERT_EQ(ret, 0);
 	ASSERT_EQ(pipe(pipe_fd), 0);
 	pid = fork();
@@ -642,7 +542,7 @@ TEST_F(multi_page, private_attach_after_write)
 		for (i = 0; i < self->page_num; i++) {
 			addr = (void *)((unsigned long)self->start +
 					(i << PAGE_SHIFT));
-			ret = check_anon_page_content(addr);
+			ret = check_page_content(addr, self->seed);
 			ASSERT_EQ(ret, 0);
 		}
 		TH_LOG("child %d finish checking", getpid());
@@ -668,11 +568,71 @@ TEST_F(multi_page, private_attach_after_write)
 	}
 }
 
+// We create a vma like a stack (MAP_GROWSDOWN)
+// and try to access the address below that vma.
+// We expect that the vma can expand successfully.
+TEST(stack_test)
+{
+	int fd, ret;
+	int pseudo_mm_id;
+	pid_t pid;
+	const unsigned long seed = 0x823823;
+	const int page_num = 6;
+	const unsigned long start = 0xdead0UL << PAGE_SHIFT;
+	const unsigned long end = start + (page_num << PAGE_SHIFT);
+
+	fd = open(DEVICE_PATH, O_RDWR);
+	ASSERT_GT(fd, 0);
+	ASSERT_EQ(clean_all_pseudo_mm(fd), 0);
+	ret = ioctl(fd, PSEUDO_MM_IOC_CREATE, (void *)(&pseudo_mm_id));
+	ASSERT_TRUE(ret == 0 && pseudo_mm_id > 0);
+	TH_LOG("process %d create pseudo_mm %d", getpid(), pseudo_mm_id);
+	ret = fill_dax_device(256, page_num, seed);
+	ASSERT_EQ(ret, 0);
+	ret = add_mmap_to(fd, pseudo_mm_id, start, end,
+			  MAP_ANONYMOUS | MAP_PRIVATE | MAP_GROWSDOWN, -1, 0);
+	ASSERT_EQ(ret, 0);
+	ret = setup_anon_map_pt(fd, pseudo_mm_id, start, page_num << PAGE_SHIFT,
+				256);
+	ASSERT_EQ(ret, 0);
+	pid = fork();
+	ASSERT_GE(pid, 0);
+	if (pid == 0) {
+		struct pseudo_mm_attach_param attach_param;
+		int i;
+		char *ptr;
+		attach_param.id = pseudo_mm_id;
+		attach_param.pid = getpid();
+		ret = ioctl(fd, PSEUDO_MM_IOC_ATTACH, (void *)(&attach_param));
+		ASSERT_EQ(ret, 0);
+
+		for (i = 0; i < page_num; i++) {
+			ret = check_page_content(
+				(void *)(start + i * PAGE_SIZE), seed);
+			ASSERT_EQ(ret, 0);
+		}
+		// access address below `start`
+		for (i = 1; i < 16; i++) {
+			ptr = (char *)(start - i * PAGE_SIZE);
+			*ptr = 'X';
+		}
+		exit(EXIT_SUCCESS);
+	} else {
+		int status;
+		ASSERT_EQ(waitpid(pid, &status, 0), pid);
+		ASSERT_TRUE(WIFEXITED(status));
+		ASSERT_EQ(WEXITSTATUS(status), 0);
+	}
+}
+
 TEST(dax_test)
 {
 	void *addr;
 	int dax_fd, ret;
-	ret = fill_dax_device(0, 1);
+	const unsigned long seed = 0xdeadbeefUL;
+	SKIP(return, "only used to test dax device");
+
+	ret = fill_dax_device(0, 1, seed);
 	ASSERT_EQ(ret, 0);
 
 	dax_fd = open(DAX_DEVICE_PATH, O_RDWR);
@@ -680,7 +640,7 @@ TEST(dax_test)
 	addr = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, dax_fd,
 		    0);
 	ASSERT_NE(addr, MAP_FAILED);
-	check_anon_page_content(addr);
+	check_page_content(addr, seed);
 }
 
 TEST_HARNESS_MAIN
