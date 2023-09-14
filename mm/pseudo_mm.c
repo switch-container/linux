@@ -83,8 +83,16 @@ unsigned long register_backend_dax_device(int fd)
 	struct file *backend_file;
 	unsigned long ret;
 
-	if (backend.filp)
-		return -EEXIST;
+	// if (backend.filp)
+	// return -EEXIST;
+	// For now, the backend do not keep state across
+	// different request of setup page table, so I allow to register
+	// multiple times for flexibility.
+	if (backend.filp) {
+		fput(backend.filp);
+		pr_warn("pseudo_mm backend dax device has changed\n");
+		backend.filp = NULL;
+	}
 
 	backend_file = fget(fd);
 	if (!backend_file)

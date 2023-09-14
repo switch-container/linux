@@ -44,12 +44,15 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 
 	id = dax_read_lock();
 	if (dev_dax->align != PAGE_SIZE) {
-		pr_warn("alignment (%#x) != PAGE_SIZE\n", dev_dax->align);
+		pr_warn("dax alignment (%#x) != PAGE_SIZE\n", dev_dax->align);
 		ret = -EIO;
 		goto failed;
 	}
 
-	// map pages one by one
+	// Map pages to dax device one by one
+	// since insert_mixed api is insert one pfn at a time.
+	// However, its performance not a big deal, since __setup_pt_for_vma is
+	// called on prepare phase, it will not effect the attach performance.
 	for (i = 0; i < nr_pages; i++) {
 		vaddr = start + (i << PAGE_SHIFT);
 		phys = dax_pgoff_to_phys(dev_dax, pgoff + i, PAGE_SIZE);
@@ -67,10 +70,6 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 			ret = -EFAULT;
 			goto failed;
 		}
-#ifdef PSEUDO_MM_DEBUG
-		pr_info("setup page table %#lx (V) to %#llx (P)\n", vaddr,
-			phys);
-#endif
 		// BEGIN imitate pin_user_pages()
 		pgmap = get_dev_pagemap(pfn_t_to_pfn(pfn), pgmap);
 		WARN_ON(!pgmap);
@@ -101,6 +100,13 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 	pin_page->pages = pages;
 	pin_page->nr_pin_pages = nr_pin_pages;
 	list_add(&pin_page->list, &pseudo_mm->pages_list);
+
+#ifdef PSEUDO_MM_DEBUG
+	pr_info("setup page table %#lx - %#lx (V) to pgoff %#lx - %#lx\n",
+		vaddr, vaddr + (nr_pages << PAGE_SHIFT), pgoff,
+		pgoff + nr_pages);
+#endif
+
 out:
 	if (pgmap)
 		put_dev_pagemap(pgmap);
@@ -131,8 +137,7 @@ unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
 	mmap_read_lock_killable(mm); // find_vma_intersection() need mmap lock
 	vma = find_vma_intersection(mm, start, end);
 	if (!range_in_vma(vma, start, end)) {
-		pr_warn("(%#lx - %#lx) is not within single vma\n",
-			vma->vm_start, vma->vm_end);
+		pr_warn("(%#lx - %#lx) is not within single vma\n", start, end);
 		ret = -EFAULT;
 		goto out;
 	}
