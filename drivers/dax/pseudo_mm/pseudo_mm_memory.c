@@ -164,3 +164,58 @@ out:
 	mmap_read_unlock(mm);
 	return ret;
 }
+
+unsigned long pseudo_mm_bring_back(int id, unsigned long start,
+				   unsigned long size)
+{
+	struct pseudo_mm *pseudo_mm;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	unsigned long vaddr, end = start + size;
+	unsigned long ret;
+
+	// start and size must be page aligned
+	if (!PAGE_ALIGNED(start) || !PAGE_ALIGNED(size) || size == 0)
+		return -EINVAL;
+	pseudo_mm = find_pseudo_mm(id);
+	if (!pseudo_mm)
+		return -ENOENT;
+
+	mm = pseudo_mm->mm;
+	mmap_read_lock_killable(mm); // find_vma_intersection() need mmap lock
+	vma = find_vma_intersection(mm, start, end);
+	if (!range_in_vma(vma, start, end)) {
+		pr_warn("(%#lx - %#lx) is not within single vma\n", start, end);
+		ret = -EFAULT;
+		goto out;
+	}
+	if (!vma_is_pseudo_mm_master(vma)) {
+		pr_warn("vma (%#lx - %#lx) is not pseudo mm master\n",
+			vma->vm_start, vma->vm_end);
+		ret = -EINVAL;
+		goto out;
+	}
+	// TODO(huang-jl): I only support to bring back private anonymous vma for now.
+	// For shared anonymous area: it is really hard to implement a mm template (more info
+	// can be found at pseudo_mm branch and git commit message).
+	// For file-backed area: it is already backed by page-cache (or local memory) by default.
+	//
+	// In fact this is not a todo, I just do not want to implement for shared anonymous vma :(
+	if (!vma_is_anonymous(vma) || (vma->vm_flags & VM_SHARED)) {
+		pr_warn("try to bring back memory within vma (%#lx - %#lx), which is not anonymous private vma\n",
+			vma->vm_start, vma->vm_end);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	// bring back pages one by one
+	for (vaddr = start; vaddr < end; vaddr += PAGE_SIZE) {
+		ret = pseudo_mm_bring_back_single_page(mm, vma, vaddr);
+		if (ret) {
+			goto out;
+		}
+	}
+out:
+	mmap_read_unlock(mm);
+	return ret;
+}

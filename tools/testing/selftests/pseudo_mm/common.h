@@ -92,6 +92,9 @@ int fill_dax_device(unsigned long pgoff, unsigned long nr_pages,
 	return 0;
 }
 
+/*
+ * This add a read-write map to `pseudo_mm_id`.
+ */
 int add_mmap_to(int pseudo_mm_fd, int pseudo_mm_id, unsigned long start,
 		unsigned long end, unsigned long flags, int fd, off_t offset)
 {
@@ -129,6 +132,18 @@ int setup_anon_map_pt(int fd, int pseudo_mm_id, unsigned long start,
 	ret = ioctl(fd, PSEUDO_MM_IOC_SETUP_PT, (void *)(&param));
 	printf("fill anon finish: %d\n", ret);
 	fflush(stdout);
+	return ret;
+}
+
+int bring_back_map(int fd, int pseudo_mm_id, unsigned long start, unsigned long size)
+{
+	struct pseudo_mm_bring_back_param param;
+	int ret;
+
+	param.id = pseudo_mm_id;
+	param.start = start;
+	param.size = size;
+	ret = ioctl(fd, PSEUDO_MM_IOC_BRING_BACK, (void *)(&param));
 	return ret;
 }
 

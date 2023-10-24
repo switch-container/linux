@@ -79,6 +79,21 @@ unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
 				 unsigned long size, pgoff_t pgoff);
 
 /*
+ * pseudo_mm_bring_back() - bring the virtual memory in pseudo_mm back to local memory.
+ * @id: pseudo_mm id
+ * @start: start address
+ * @size: size of continuous virtual address
+ *
+ * This function will bring the memory of virtual address range
+ * [start, start + size) back to local memory. 
+ *
+ * *Note*: The [start, start + size) should not exceed the boundary of single
+ * vma. Return 0 when succeed.
+ */
+unsigned long pseudo_mm_bring_back(int id, unsigned long start,
+				   unsigned long size);
+
+/*
  * pseudo_mm_attach() - insert *all* memory mapping into an existing process's address space
  * @pid: process id
  * @id: pseudo_mm_id

@@ -29,10 +29,18 @@ TEST(mixed_mapping)
 	const int file_num = 8;
 	char filename[256];
 	unsigned long *file_page_nums;
+	unsigned long *anon_pages_nums; // [anon page nums]
+	unsigned long *anon_starts;
 	struct pseudo_mm_attach_param attach_param;
 
 	file_page_nums = calloc(file_num, sizeof(unsigned long));
 	ASSERT_NE(file_page_nums, NULL);
+
+	anon_pages_nums = calloc(anon_num, sizeof(unsigned long));
+	ASSERT_NE(anon_pages_nums, NULL);
+
+	anon_starts = calloc(anon_num, sizeof(unsigned long));
+	ASSERT_NE(anon_starts, NULL);
 	fd = open(DEVICE_PATH, O_RDWR);
 	ASSERT_GT(fd, 0);
 	// ASSERT_EQ(clean_all_pseudo_mm(fd), 0);
@@ -42,6 +50,7 @@ TEST(mixed_mapping)
 
 	vaddr = start;
 	for (int i = 0; i < anon_num; i++) {
+		anon_starts[i] = vaddr;
 		page_num = random() % 32 + 1;
 		ret = fill_dax_device(dax_pgoff, page_num, seed);
 		ASSERT_EQ(ret, 0);
@@ -52,9 +61,13 @@ TEST(mixed_mapping)
 		ret = setup_anon_map_pt(fd, pseudo_mm_id, vaddr,
 					page_num << PAGE_SHIFT, dax_pgoff);
 		ASSERT_EQ(ret, 0);
+		TH_LOG("setup anon map %#lx - %#lx (%ld pages)", vaddr,
+		       vaddr + (page_num << PAGE_SHIFT), page_num);
 
 		dax_pgoff += page_num;
-		vaddr += page_num << PAGE_SHIFT;
+		// we add 1 here to prevent vma merging
+		vaddr += (page_num + 1) << PAGE_SHIFT;
+		anon_pages_nums[i] = page_num;
 	}
 
 	anon_final_addr = vaddr;
@@ -97,10 +110,15 @@ TEST(mixed_mapping)
 				    (void *)(&attach_param));
 			ASSERT_EQ(ret, 0);
 			// first we check anonymous mapping
-			for (ptr = start; ptr != anon_final_addr;
-			     ptr += PAGE_SIZE) {
-				ret = check_page_content((void *)ptr, seed);
-				ASSERT_EQ(ret, 0);
+			for (j = 0; j < anon_num; j++) {
+				for (ptr = anon_starts[j];
+				     ptr < anon_starts[j] + (anon_pages_nums[j]
+							     << PAGE_SHIFT);
+				     ptr += PAGE_SIZE) {
+					ret = check_page_content((void *)ptr,
+								 seed);
+					ASSERT_EQ(ret, 0);
+				}
 			}
 			TH_LOG("anon mapping (final = %#lx) check succeed",
 			       anon_final_addr);
@@ -110,6 +128,7 @@ TEST(mixed_mapping)
 			//
 			// j is the index of file mapping
 			// k is the current page index in that mapping
+			ptr = anon_final_addr;
 			for (j = 0; j < file_num; j++) {
 				gen_filename(j, "mixed_mapping", filename);
 				for (k = 0; k < file_page_nums[j]; k++) {
@@ -128,6 +147,90 @@ TEST(mixed_mapping)
 			ASSERT_EQ(WEXITSTATUS(status), 0);
 		}
 	}
+
+	TH_LOG("start bring some memory randomly into local mem...");
+	// then we try to bring some memory into local
+	for (int i = 0; i < anon_num; i++) {
+		vaddr = anon_starts[i];
+		page_num = random() % anon_pages_nums[i];
+		if (page_num > 0) {
+			ret = bring_back_map(fd, pseudo_mm_id, vaddr,
+					     page_num << PAGE_SHIFT);
+			ASSERT_EQ(ret, 0);
+			TH_LOG("bring back %#lx - %#lx (%ld / %ld pages)",
+			       vaddr, vaddr + (page_num << PAGE_SHIFT),
+			       page_num, anon_pages_nums[i]);
+		}
+	}
+
+	vaddr = anon_final_addr;
+	for (int i = 0; i < file_num; i++) {
+		page_num = random() % file_page_nums[i];
+		if (page_num > 0) {
+			ret = bring_back_map(fd, pseudo_mm_id, vaddr,
+					     page_num << PAGE_SHIFT);
+			// file backed mapping could not be bring back again
+			ASSERT_NE(ret, 0);
+		}
+		vaddr += file_page_nums[i] << PAGE_SHIFT;
+	}
+
+	TH_LOG("start check content again after bring mem back...");
+	// we attach multiple times
+	for (i = 0; i < 16; i++) {
+		pid = fork();
+		ASSERT_GE(pid, 0);
+		if (pid == 0) {
+			unsigned long ptr;
+			int j, k;
+
+			attach_param.id = pseudo_mm_id;
+			attach_param.pid = getpid();
+			ret = ioctl(fd, PSEUDO_MM_IOC_ATTACH,
+				    (void *)(&attach_param));
+			ASSERT_EQ(ret, 0);
+			// first we check anonymous mapping
+			for (j = 0; j < anon_num; j++) {
+				for (ptr = anon_starts[j];
+				     ptr < anon_starts[j] + (anon_pages_nums[j]
+							     << PAGE_SHIFT);
+				     ptr += PAGE_SIZE) {
+					ret = check_page_content((void *)ptr,
+								 seed);
+					ASSERT_EQ(ret, 0);
+				}
+			}
+			TH_LOG("anon mapping (final = %#lx) check succeed",
+			       anon_final_addr);
+			// then we check file mapping
+			// (NOTE: the seed of file mapping is not `seed`)
+			// we have record the number of pages in each file mapping
+			//
+			// j is the index of file mapping
+			// k is the current page index in that mapping
+			ptr = anon_final_addr;
+			for (j = 0; j < file_num; j++) {
+				gen_filename(j, "mixed_mapping", filename);
+				for (k = 0; k < file_page_nums[j]; k++) {
+					ret = check_page_content(
+						(void *)ptr,
+						djb_hash(filename));
+					ASSERT_EQ(ret, 0);
+					ptr += PAGE_SIZE;
+				}
+			}
+			exit(EXIT_SUCCESS);
+		} else {
+			int status;
+			ASSERT_EQ(waitpid(pid, &status, 0), pid);
+			ASSERT_TRUE(WIFEXITED(status));
+			ASSERT_EQ(WEXITSTATUS(status), 0);
+		}
+	}
+
+	free(anon_pages_nums);
+	free(file_page_nums);
+	free(anon_starts);
 }
 
 TEST_HARNESS_MAIN
