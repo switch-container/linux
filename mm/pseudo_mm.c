@@ -28,6 +28,7 @@ DEFINE_XARRAY_ALLOC1(pseudo_mm_array);
 /* kmemcache for pseudo_mm struct */
 static struct kmem_cache *pseudo_mm_cachep;
 static struct pseudo_mm_backend backend;
+static pseudo_mm_rdma_pf_ops_t *pseudo_mm_rdma_pf_ops = NULL;
 
 #define pseudo_mm_alloc() (kmem_cache_alloc(pseudo_mm_cachep, GFP_KERNEL))
 
@@ -78,6 +79,25 @@ int __init pseudo_mm_cache_init(void)
 }
 postcore_initcall(pseudo_mm_cache_init);
 
+unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op)
+{
+	if (pseudo_mm_rdma_pf_ops != NULL) {
+		pr_err("only allowed to register one pseudo_mm_rdma_pf_handler, already set to %p!",
+		       pseudo_mm_rdma_pf_ops);
+		return -EEXIST;
+	}
+	pseudo_mm_rdma_pf_ops = op;
+	return 0;
+}
+EXPORT_SYMBOL(register_pseudo_mm_rdma_pf_handler);
+
+int pseudo_mm_rdma_pf_handle(struct page *page, pgoff_t remote_pgoff)
+{
+	if (pseudo_mm_rdma_pf_ops)
+		return pseudo_mm_rdma_pf_ops(page, remote_pgoff);
+	return -ENOENT;
+}
+
 unsigned long register_backend_dax_device(int fd)
 {
 	struct file *backend_file;
@@ -109,6 +129,11 @@ err:
 	return ret;
 }
 
+inline bool pseudo_mm_rdma_pf_handler_enable(void)
+{
+	return pseudo_mm_rdma_pf_ops != NULL;
+}
+
 /*
  * create a pseudo_mm struct and initialize it
  *
@@ -120,11 +145,6 @@ int create_pseudo_mm(void)
 	struct pseudo_mm *pseudo_mm;
 	struct xa_limit limit;
 	int ret, id;
-
-	if (!backend.filp) {
-		pr_warn("do not register pseudo_mm backend!\n");
-		return -ENOENT;
-	}
 
 	mm = mm_alloc_wo_task();
 	if (!mm)

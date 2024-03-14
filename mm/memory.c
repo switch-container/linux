@@ -2373,7 +2373,7 @@ EXPORT_SYMBOL(vmf_insert_mixed);
  * imitate vmf_insert_mixed()
  * only used by pseudo_mm module.
  */
-vm_fault_t pseudo_mm_insert_mixed(struct vm_area_struct *vma,
+vm_fault_t pseudo_mm_insert_dax(struct vm_area_struct *vma,
 					 unsigned long addr, pfn_t pfn)
 {
 	struct mm_struct *mm = vma->vm_mm;
@@ -2408,6 +2408,37 @@ vm_fault_t pseudo_mm_insert_mixed(struct vm_area_struct *vma,
 		entry = pte_mkspecial(pfn_t_pte(pfn, pgprot));
 
 	page = pfn_t_to_page(pfn);
+
+	set_pte_at(mm, addr, pte, entry);
+	update_mmu_cache(vma, addr, pte); /* XXX: why not for insert_page? */
+
+out_unlock:
+	pte_unmap_unlock(pte, ptl);
+	return ret;
+}
+
+vm_fault_t pseudo_mm_insert_rdma(struct vm_area_struct *vma, unsigned long addr,
+				 pgoff_t pgoff)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *pte, entry;
+	spinlock_t *ptl;
+	vm_fault_t ret = VM_FAULT_NOPAGE;
+
+	VM_BUG_ON(addr < vma->vm_start || addr >= vma->vm_end);
+
+	pte = get_locked_pte(mm, addr, &ptl);
+	if (!pte)
+		return VM_FAULT_OOM;
+	if (!pte_none(*pte)) {
+		pr_warn("addr %#lx in vma (%#lx - %#lx) pte is not none!", addr,
+			vma->vm_start, vma->vm_end);
+		ret = VM_FAULT_SIGBUS;
+		goto out_unlock;
+	}
+
+	/* Ok, finally just insert the thing.. */
+	entry = pseudo_mm_rdma_entry_to_pte(pseudo_mm_rdma_entry(pgoff));
 
 	set_pte_at(mm, addr, pte, entry);
 	update_mmu_cache(vma, addr, pte); /* XXX: why not for insert_page? */
@@ -4204,6 +4235,114 @@ out_release:
 	return ret;
 }
 
+static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct mm_struct *vm_mm = vma->vm_mm;
+	vm_fault_t ret = 0;
+	pseudo_mm_rdma_entry_t entry;
+	struct page *page;
+	struct folio *folio;
+	pgoff_t remote_page_offset;
+	pte_t pte;
+
+	if (!pte_unmap_same(vmf))
+		goto out;
+
+	entry = pte_to_pseudo_mm_rdma_entry(vmf->orig_pte);
+	remote_page_offset = pseudo_mm_rdma_offset(entry);
+	if (unlikely(!vma_is_anonymous(vma))) {
+		// unsupport vma for now
+		pr_err("get non anonymous vma in do_pseudo_mm_rdma_page addr %#lx\n", vmf->address);
+		return VM_FAULT_SIGBUS;
+	}
+	if (unlikely(anon_vma_prepare(vma)))
+		goto oom;
+	// TODO(huang-jl): movable or not ?
+	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vmf->address, false);
+	if (!folio)
+		goto oom;
+
+	page = &folio->page;
+	if (mem_cgroup_charge(folio, vma->vm_mm, GFP_KERNEL))
+		goto release_out;
+	cgroup_throttle_swaprate(page, GFP_KERNEL);
+	// take it as major page fault
+	count_vm_event(PGMAJFAULT);
+	count_memcg_event_mm(vmf->vma->vm_mm, PGMAJFAULT);
+
+	__folio_set_locked(folio);
+	// read from rdma
+	if (pseudo_mm_rdma_pf_handle(page, remote_page_offset)) {
+		ret = VM_FAULT_SIGBUS;
+		goto release_out;
+	}
+	// Currently we are not allowed to retry unless been killed
+	// since FAULT_FLAG_ALLOW_RETRY is likely to been set
+	// if we use folio_lock_or_retry, we will easily retry for the
+	// first time of fault and wait bandwidth
+	//
+	// TODO(huang-jl): Use folio_lock_or_retry() after we having process
+	// level cache for rdma request.
+	if (vmf->flags & FAULT_FLAG_KILLABLE) {
+		if (folio_lock_killable(folio)) {
+			ret = VM_FAULT_RETRY;
+			goto release_out;
+		}
+	} else {
+		folio_lock(folio);
+	}
+	// if (!folio_lock_or_retry(folio, vm_mm, vmf->flags)) {
+	// 	ret |= VM_FAULT_RETRY;
+	// 	goto release_out;
+	// }
+	if (unlikely(!folio_test_uptodate(folio))) {
+		ret = VM_FAULT_SIGBUS;
+		goto unlock_out;
+	}
+	// check and prepare to install new pte entry
+	pte = mk_pte(page, vma->vm_page_prot);
+	pte = pte_sw_mkyoung(pte);
+	if (vma->vm_flags & VM_WRITE)
+		pte = pte_mkwrite(pte_mkdirty(pte));
+	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
+			&vmf->ptl);
+	if (unlikely(!pte_same(*vmf->pte, vmf->orig_pte))) {
+		// others has already fault in this page
+		// we just return
+		update_mmu_tlb(vma, vmf->address, vmf->pte);
+		goto nomap_out;
+	}
+	ret = check_stable_address_space(vma->vm_mm);
+	if (ret)
+		goto nomap_out;
+
+	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+
+	ptep_clear_flush_notify(vma, vmf->address, vmf->pte);
+	page_add_new_anon_rmap(page, vma, vmf->address);
+	lru_cache_add_inactive_or_unevictable(page, vma);
+
+	set_pte_at(vm_mm, vmf->address, vmf->pte, pte);
+	set_pte_at_notify(vm_mm, vmf->address, vmf->pte, pte);
+	update_mmu_cache(vma, vmf->address, vmf->pte);
+
+	// NOTE: if succeed, do not put folio
+	folio_unlock(folio);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+out:
+	return ret;
+nomap_out:
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+unlock_out:
+	folio_unlock(folio);
+release_out:
+	folio_put(folio);
+	return ret;
+oom:
+	return VM_FAULT_OOM;
+}
+
 /*
  * We enter with non-exclusive mmap_lock (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
@@ -5105,6 +5244,9 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 		else
 			return do_fault(vmf);
 	}
+
+	if (is_pseudo_mm_rdma_fault(vmf) && pseudo_mm_rdma_pf_handler_enable())
+		return do_pseudo_mm_rdma_page(vmf);
 
 	if (!pte_present(vmf->orig_pte))
 		return do_swap_page(vmf);

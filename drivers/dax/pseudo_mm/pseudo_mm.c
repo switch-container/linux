@@ -85,7 +85,7 @@ static inline long _pseudo_mm_setup_pt(void *__user args)
 	if (err)
 		return err;
 	err = pseudo_mm_setup_pt(param.id, param.start, param.size,
-				 param.pgoff);
+				 param.pgoff, param.type);
 	return err;
 }
 

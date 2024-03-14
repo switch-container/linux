@@ -21,13 +21,14 @@
  * @nr_pages: number of pages needed to be set
  * @pgoff: page offset of dax device
  */
-static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
-					struct vm_area_struct *vma,
-					unsigned long start,
-					unsigned long nr_pages, pgoff_t pgoff)
+static unsigned long __setup_pt_for_vma_dax(struct pseudo_mm *pseudo_mm,
+					    struct vm_area_struct *vma,
+					    unsigned long start,
+					    unsigned long nr_pages,
+					    pgoff_t pgoff)
 {
 	struct pseudo_mm_backend *backend = pseudo_mm_get_backend();
-	struct dev_dax *dev_dax = backend->filp->private_data;
+	struct dev_dax *dev_dax;
 	struct pseudo_mm_pin_pages *pin_page = NULL;
 	struct dev_pagemap *pgmap = NULL;
 	struct page *page, **pages;
@@ -37,6 +38,13 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 	unsigned long ret = 0, i, vaddr;
 	long nr_pin_pages = 0;
 	vm_fault_t vmf_ret;
+
+	if (!backend->filp) {
+		pr_err("do not register dax backend for pseudo_mm\n");
+		return -ENOENT;
+	}
+
+	dev_dax = backend->filp->private_data;
 
 	pages = kvmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
 	if (!pages)
@@ -63,9 +71,9 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 		}
 		pfn = phys_to_pfn_t(phys, PFN_DEV | PFN_MAP);
 
-		vmf_ret = pseudo_mm_insert_mixed(vma, vaddr, pfn);
+		vmf_ret = pseudo_mm_insert_dax(vma, vaddr, pfn);
 		if (unlikely(vmf_ret & VM_FAULT_ERROR)) {
-			pr_warn("vmf_insert_mixed vaddr %#lx pfn %#llx phys %#llx failed\n",
+			pr_warn("pseudo_mm_insert_dax vaddr %#lx pfn %#llx phys %#llx failed\n",
 				vaddr, pfn.val, phys);
 			ret = -EFAULT;
 			goto failed;
@@ -102,7 +110,7 @@ static unsigned long __setup_pt_for_vma(struct pseudo_mm *pseudo_mm,
 	list_add(&pin_page->list, &pseudo_mm->pages_list);
 
 #ifdef PSEUDO_MM_DEBUG
-	pr_info("setup page table %#lx - %#lx (V) to pgoff %#lx - %#lx\n",
+	pr_info("setup page table %#lx - %#lx (V) to DAX pgoff %#lx - %#lx\n",
 		vaddr, vaddr + (nr_pages << PAGE_SHIFT), pgoff,
 		pgoff + nr_pages);
 #endif
@@ -122,8 +130,54 @@ failed:
 	goto out;
 }
 
+/* 
+ * setup rdma page table entry for vma in pseudo_mm
+ * @start: start virtual address
+ * @nr_pages: number of pages needed to be set
+ * @pgoff: page offset of dax device
+ */
+static unsigned long __setup_pt_for_vma_rdma(struct pseudo_mm *pseudo_mm,
+					     struct vm_area_struct *vma,
+					     unsigned long start,
+					     unsigned long nr_pages,
+					     pgoff_t pgoff)
+{
+	unsigned long ret = 0, i, vaddr;
+	vm_fault_t vmf_ret;
+
+	if (!pseudo_mm_rdma_pf_handler_enable()) {
+		pr_err("pseudo_mm_rdma_pf_handler not enable\n");
+		return -ENOENT;
+	}
+
+	// Map pages to dax device one by one
+	// since insert_mixed api is insert one pfn at a time.
+	// However, its performance not a big deal, since __setup_pt_for_vma is
+	// called on prepare phase, it will not effect the attach performance.
+	for (i = 0; i < nr_pages; i++) {
+		vaddr = start + (i << PAGE_SHIFT);
+		vmf_ret = pseudo_mm_insert_rdma(vma, vaddr, pgoff + i);
+		if (unlikely(vmf_ret & VM_FAULT_ERROR)) {
+			pr_warn("pseudo_mm_insert_rdma vaddr %#lx pgoff %#lx failed\n",
+				vaddr, pgoff + i);
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+#ifdef PSEUDO_MM_DEBUG
+	pr_info("setup page table %#lx - %#lx (V) to RDMA pgoff %#lx - %#lx\n",
+		vaddr, vaddr + (nr_pages << PAGE_SHIFT), pgoff,
+		pgoff + nr_pages);
+#endif
+
+out:
+	return ret;
+}
+
 unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
-				 unsigned long size, pgoff_t pgoff)
+				 unsigned long size, pgoff_t pgoff,
+				 enum pseudo_mm_pt_type type)
 {
 	struct pseudo_mm *pseudo_mm = find_pseudo_mm(id);
 	struct mm_struct *mm;
@@ -158,8 +212,18 @@ unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
 		goto out;
 	}
 
-	ret = __setup_pt_for_vma(pseudo_mm, vma, start, size >> PAGE_SHIFT,
-				 pgoff);
+	switch (type) {
+	case DAX_MEM:
+		ret = __setup_pt_for_vma_dax(pseudo_mm, vma, start,
+					     size >> PAGE_SHIFT, pgoff);
+		break;
+	case RDMA_MEM:
+		ret = __setup_pt_for_vma_rdma(pseudo_mm, vma, start,
+					      size >> PAGE_SHIFT, pgoff);
+		break;
+	default:
+		ret = -EINVAL;
+	}
 out:
 	mmap_read_unlock(mm);
 	return ret;

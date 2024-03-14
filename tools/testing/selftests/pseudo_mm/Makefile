@@ -3,6 +3,6 @@
 CFLAGS += -Wall -O2
 
 TEST_PROGS := run.sh
-TEST_GEN_PROGS := anon_only file_only register bring_back interactive mix
+TEST_GEN_PROGS := anon_only file_only register bring_back interactive mix rdma
 
 include ../lib.mk

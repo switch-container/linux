@@ -127,10 +127,30 @@ int setup_anon_map_pt(int fd, int pseudo_mm_id, unsigned long start,
 	param.start = start;
 	param.size = size;
 	param.pgoff = pgoff;
-	printf("fill anon start\n");
+	param.type = DAX_MEM;
+	printf("fill DAX anon start\n");
 	fflush(stdout);
 	ret = ioctl(fd, PSEUDO_MM_IOC_SETUP_PT, (void *)(&param));
-	printf("fill anon finish: %d\n", ret);
+	printf("fill DAX anon finish: %d\n", ret);
+	fflush(stdout);
+	return ret;
+}
+
+int setup_anon_map_pt_rdma(int fd, int pseudo_mm_id, unsigned long start,
+		      unsigned long size, unsigned long pgoff)
+{
+	struct pseudo_mm_setup_pt_param param;
+	int ret;
+
+	param.id = pseudo_mm_id;
+	param.start = start;
+	param.size = size;
+	param.pgoff = pgoff;
+	param.type = RDMA_MEM;
+	printf("fill RDMA anon start\n");
+	fflush(stdout);
+	ret = ioctl(fd, PSEUDO_MM_IOC_SETUP_PT, (void *)(&param));
+	printf("fill RDMA anon finish: %d\n", ret);
 	fflush(stdout);
 	return ret;
 }

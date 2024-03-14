@@ -1,11 +1,16 @@
 #ifndef __LINUX_PSEUDO_MM__
 #define __LINUX_PSEUDO_MM__
 
+#include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <linux/xarray.h>
 #include <linux/rmap.h>
 
 #define PSEUDO_MM_DEBUG
+
+typedef struct {
+	unsigned long val;
+} pseudo_mm_rdma_entry_t;
 
 struct pseudo_mm {
 	struct mm_struct *mm;
@@ -27,13 +32,29 @@ struct pseudo_mm_unmap_args {
 	struct folio *old_folio;
 };
 
+enum pseudo_mm_pt_type;
+
 struct pseudo_mm_backend {
 	struct file *filp;
 };
 
+// read single page from remote
+// @page: the local page, which will be filled with remote memory content
+// @rpgoff: the remote page offset
+//
+// NOTE: that the page should be locked before call this method
+// after return with 0 and get the page lock AGAIN to guarantee
+// that page content is loaded.
+typedef int (pseudo_mm_rdma_pf_ops_t)(struct page *page, pgoff_t rpgoff);
+
 /* return 0 if succeed */
 unsigned long register_backend_dax_device(int fd);
 inline struct pseudo_mm_backend *pseudo_mm_get_backend(void);
+
+/* return 0 if succeed */
+unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op);
+bool pseudo_mm_rdma_pf_handler_enable(void);
+pseudo_mm_rdma_pf_ops_t pseudo_mm_rdma_pf_handle;
 
 /*
  * create_pseudo_mm() - create and init the pseudo_mm
@@ -66,7 +87,8 @@ unsigned long pseudo_mm_add_map(int id, unsigned long start, unsigned long size,
  * @id: pseudo_mm id
  * @start: start address
  * @size: size of continuous virtual address
- * @pgoff: physical page offset of backend dax device (page number)
+ * @pgoff: physical page offset of backend dax device (page number) or remote rdma page offset
+ * @type: the page table entry type, currently only support RDMA and DAX
  *
  * This function will establish the page table of virtual address range
  * [start, start + size) and let it point to physical page start at pgoff
@@ -76,7 +98,8 @@ unsigned long pseudo_mm_add_map(int id, unsigned long start, unsigned long size,
  * vma. Return 0 when succeed.
  */
 unsigned long pseudo_mm_setup_pt(int id, unsigned long start,
-				 unsigned long size, pgoff_t pgoff);
+				 unsigned long size, pgoff_t pgoff,
+				 enum pseudo_mm_pt_type type);
 
 /*
  * pseudo_mm_bring_back() - bring the virtual memory in pseudo_mm back to local memory.
@@ -112,6 +135,37 @@ static inline bool vma_is_pseudo_mm_master(struct vm_area_struct *vma)
 static inline bool vma_is_pseudo_mm(struct vm_area_struct *vma)
 {
 	return !!(vma->pseudo_mm_flag & PSEUDO_MM_VMA);
+}
+
+/*
+ * Following macro only valid in x86 arch
+ * NOTE that BIT 4 (PCD) is unused by swap, so we can use it to indicate
+ * that this page should be read by pseudo_mm rdma.
+ */
+/* We always extract/encode the offset by shifting it all the way up, and then down again */
+#define PSEUDO_MM_RDMA_RDMA_OFFSET_SHIFT (_PAGE_BIT_PROTNONE + 1)
+
+/* Shift up (to get rid of type), then down to get value */
+#define pseudo_mm_rdma_offset(x) (~(x).val >> PSEUDO_MM_RDMA_RDMA_OFFSET_SHIFT)
+
+/*
+ * Shift the offset up "too far" by TYPE bits, then down again
+ * The offset is inverted by a binary not operation to make the high
+ * physical bits set.
+ */
+#define pseudo_mm_rdma_entry(offset)                         \
+	((pseudo_mm_rdma_entry_t){ (~(unsigned long)(offset) \
+				    << PSEUDO_MM_RDMA_RDMA_OFFSET_SHIFT) })
+
+#define pte_to_pseudo_mm_rdma_entry(pte) \
+	((pseudo_mm_rdma_entry_t){ pte_val((pte)) & (~_PAGE_PCD) })
+#define pseudo_mm_rdma_entry_to_pte(x) ((pte_t){ .pte = (x).val | _PAGE_PCD })
+
+static inline bool is_pseudo_mm_rdma_fault(struct vm_fault *vmf)
+{
+	return (!pte_present(vmf->orig_pte)) &&
+	       (pte_flags(vmf->orig_pte) & _PAGE_PCD) &&
+	       vma_is_pseudo_mm(vmf->vma);
 }
 
 #endif

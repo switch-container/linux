@@ -1703,6 +1703,8 @@ static bool mem_cgroup_out_of_memory(struct mem_cgroup *memcg, gfp_t gfp_mask,
 	 * A few threads which were not waiting at mutex_lock_killable() can
 	 * fail to bail out. Therefore, check again after holding oom_lock.
 	 */
+	// pr_info("mem_cgroup_out_of_memory(): cgroup usgae: %ld limit: %ld (pages)\n",
+	// 			 page_counter_read(&memcg->memory), READ_ONCE(memcg->memory.max));
 	ret = task_is_dying() || out_of_memory(&oc);
 
 unlock:
@@ -6434,6 +6436,9 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 
 		if (nr_pages <= max)
 			break;
+
+		// pr_info("memory_max_write(): cgroup usgae: %ld limit: %ld (pages)\n",
+		// 			 nr_pages, max);
 
 		if (signal_pending(current))
 			break;

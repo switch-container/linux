@@ -2949,8 +2949,11 @@ vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr,
 vm_fault_t vmf_insert_mixed(struct vm_area_struct *vma, unsigned long addr,
 			pfn_t pfn);
 /* only used by pseudo_mm module */
-vm_fault_t pseudo_mm_insert_mixed(struct vm_area_struct *vma,
+vm_fault_t pseudo_mm_insert_dax(struct vm_area_struct *vma,
 					 unsigned long addr, pfn_t pfn);
+/* only used by pseudo_mm module */
+vm_fault_t pseudo_mm_insert_rdma(struct vm_area_struct *vma,
+					 unsigned long addr, pgoff_t pgoff);
 vm_fault_t vmf_insert_mixed_prot(struct vm_area_struct *vma, unsigned long addr,
 			pfn_t pfn, pgprot_t pgprot);
 vm_fault_t vmf_insert_mixed_mkwrite(struct vm_area_struct *vma,
