@@ -111,7 +111,7 @@ static unsigned long __setup_pt_for_vma_dax(struct pseudo_mm *pseudo_mm,
 
 #ifdef PSEUDO_MM_DEBUG
 	pr_info("setup page table %#lx - %#lx (V) to DAX pgoff %#lx - %#lx\n",
-		vaddr, vaddr + (nr_pages << PAGE_SHIFT), pgoff,
+		start, start + (nr_pages << PAGE_SHIFT), pgoff,
 		pgoff + nr_pages);
 #endif
 
@@ -167,7 +167,7 @@ static unsigned long __setup_pt_for_vma_rdma(struct pseudo_mm *pseudo_mm,
 
 #ifdef PSEUDO_MM_DEBUG
 	pr_info("setup page table %#lx - %#lx (V) to RDMA pgoff %#lx - %#lx\n",
-		vaddr, vaddr + (nr_pages << PAGE_SHIFT), pgoff,
+		start, start + (nr_pages << PAGE_SHIFT), pgoff,
 		pgoff + nr_pages);
 #endif
 

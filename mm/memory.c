@@ -4251,9 +4251,13 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 
 	entry = pte_to_pseudo_mm_rdma_entry(vmf->orig_pte);
 	remote_page_offset = pseudo_mm_rdma_offset(entry);
-	if (unlikely(!vma_is_anonymous(vma))) {
-		// unsupport vma for now
-		pr_err("get non anonymous vma in do_pseudo_mm_rdma_page addr %#lx\n", vmf->address);
+	// NOTE by huang-jl: CRIU will dump private file-backed mapping if those
+	// page has been written (through the /proc/<pid>/pagemap's 61 bit).
+	//
+	// So both file-mapping and anon-mappings probably need to read from rdma,
+	// but we only support private mappings for now, there is double check
+	if (unlikely(vma->vm_flags & VM_SHARED)) {
+		pr_err("get shared vma in do_pseudo_mm_rdma_page addr %#lx\n", vmf->address);
 		return VM_FAULT_SIGBUS;
 	}
 	if (unlikely(anon_vma_prepare(vma)))
@@ -4277,13 +4281,14 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 		ret = VM_FAULT_SIGBUS;
 		goto release_out;
 	}
-	// Currently we are not allowed to retry unless been killed
-	// since FAULT_FLAG_ALLOW_RETRY is likely to been set
-	// if we use folio_lock_or_retry, we will easily retry for the
-	// first time of fault and wait bandwidth
-	//
-	// TODO(huang-jl): Use folio_lock_or_retry() after we having process
-	// level cache for rdma request.
+	// Since pseudo_mm_rdma_pf_handle is synchronized,
+	// using folio_lock_or_retry() or folio_lock_*() are both fine.
+	// If in the future I try to implement an async rdma_read,
+	// we are not allowed to retry unless been killed.
+	// That is because FAULT_FLAG_ALLOW_RETRY is likely to been set
+	// if we use folio_lock_or_retry, we will likely retry for the
+	// first time of fault and waste rdma bandwidth and iops, unless
+	// we having process-level cache (like address_space).
 	if (vmf->flags & FAULT_FLAG_KILLABLE) {
 		if (folio_lock_killable(folio)) {
 			ret = VM_FAULT_RETRY;
@@ -4311,6 +4316,7 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 		// others has already fault in this page
 		// we just return
 		update_mmu_tlb(vma, vmf->address, vmf->pte);
+		ret |= VM_FAULT_NOPAGE;
 		goto nomap_out;
 	}
 	ret = check_stable_address_space(vma->vm_mm);
