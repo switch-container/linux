@@ -1,8 +1,8 @@
-// NOTE by (huang-jl): most of the code is copied directly from fastswap
+// NOTE by (huang-jl): This is based on fastswap and only be tested on rxe.
 // Please refer to eurosys paper: Can Far Memory Improve Job Throughput?
-
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/smp.h>
 #include <linux/slab.h>
 #include <linux/cpumask.h>
 #include <linux/pseudo_mm.h>
@@ -16,6 +16,14 @@ static int numcpus;
 static char serverip[INET_ADDRSTRLEN];
 static char clientip[INET_ADDRSTRLEN];
 static struct kmem_cache *req_cache;
+
+// #ifdef PSEUDO_MM_DEBUG
+// struct __rdma_debug {
+// 	u64 counter;
+// 	u64 last_ts;
+// };
+// static DEFINE_PER_CPU(struct __rdma_debug, debug_info);
+// #endif
 
 module_param_named(sport, serverport, int, 0644);
 module_param_string(sip, serverip, INET_ADDRSTRLEN, 0644);
@@ -613,7 +621,7 @@ static inline int poll_target(struct rdma_queue *q, int target)
 		spin_lock_irqsave(&q->cq_lock, flags);
 		completed += ib_process_cq_direct(q->cq, target - completed);
 		spin_unlock_irqrestore(&q->cq_lock, flags);
-		cpu_relax();
+		cond_resched();
 	}
 
 	return completed;
@@ -664,20 +672,38 @@ static inline int begin_read(struct rdma_queue *q, struct page *page,
 int pseudo_mm_rdma_read_page(struct page *page, pgoff_t remote_pgoff)
 {
 	struct rdma_queue *q;
-	int ret;
+	int ret, cpu;
 	u64 roffset = remote_pgoff << PAGE_SHIFT;
+	// struct __rdma_debug *debug_ptr;
 
-	// #ifdef PSEUDO_MM_DEBUG
-	// 	u64 start_ns = ktime_get_ns(), end_ns;
-	// #endif
+#ifdef PSEUDO_MM_DEBUG
+	static DEFINE_RATELIMIT_STATE(ratelimit, HZ, 5);
+	u64 start_ns = ktime_get_ns(), end_ns;
+	// u64 dur;
+#endif
+
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(PageUptodate(page), page);
 
-	local_bh_disable();
-	q = pseudo_mm_rdma_get_queue(smp_processor_id());
+	// local_bh_disable();
+	cpu = get_cpu();
+// #ifdef PSEUDO_MM_DEBUG
+// 	debug_ptr = this_cpu_ptr(&debug_info);
+// 	dur = start_ns - debug_ptr->last_ts;
+// 	if (dur >= 1000000000) {
+// 		pr_info("pseudo_mm_rdma_read_page on [CPU %d] in the past %lld ns called %lld times\n",
+// 			cpu, dur, debug_ptr->counter);
+// 		debug_ptr->last_ts = start_ns;
+// 		debug_ptr->counter = 0;
+// 	} else {
+// 		debug_ptr->counter++;
+// 	}
+// #endif
+	q = pseudo_mm_rdma_get_queue(cpu);
 	ret = begin_read(q, page, roffset);
-	local_bh_enable();
+	put_cpu();
+	// local_bh_enable();
 	if (unlikely(ret)) {
 #ifdef PSEUDO_MM_DEBUG
 		pr_err("pseudo_mm_rdma begin_read() failed: %d\n", ret);
@@ -687,11 +713,14 @@ int pseudo_mm_rdma_read_page(struct page *page, pgoff_t remote_pgoff)
 	// Until now we only issue the rdma request
 	drain_queue(q);
 
-	// #ifdef PSEUDO_MM_DEBUG
-	// 	end_ns = ktime_get_ns();
-	// 	pr_info("pid: %d read one remote page at %#lx took %lld ns\n",
-	// 		task_pid_nr(current), remote_pgoff, end_ns - start_ns);
-	// #endif
+#ifdef PSEUDO_MM_DEBUG
+	end_ns = ktime_get_ns();
+	// print for more than 10ms duration
+	if (((end_ns - start_ns)) > 10000000UL && __ratelimit(&ratelimit))
+		pr_info("[pid: %d] read one remote page at %#lx took %lld ns\n",
+			task_pid_nr(current), remote_pgoff, end_ns - start_ns);
+
+#endif
 	return 0;
 }
 
