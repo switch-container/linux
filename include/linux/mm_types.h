@@ -627,6 +627,9 @@ struct mm_struct {
 
 		unsigned long flags; /* Must use atomic bitops to access */
 
+		atomic64_t pseudo_mm_cow_nr;
+		atomic64_t pseudo_mm_rdma_read_nr;
+
 #ifdef CONFIG_AIO
 		spinlock_t			ioctx_lock;
 		struct kioctx_table __rcu	*ioctx_table;

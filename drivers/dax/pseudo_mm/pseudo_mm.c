@@ -84,8 +84,8 @@ static inline long _pseudo_mm_setup_pt(void *__user args)
 	err = copy_from_user(&param, args, sizeof(param));
 	if (err)
 		return err;
-	err = pseudo_mm_setup_pt(param.id, param.start, param.size,
-				 param.pgoff, param.type);
+	err = pseudo_mm_setup_pt(param.id, param.start, param.size, param.pgoff,
+				 param.type);
 	return err;
 }
 
@@ -97,6 +97,30 @@ static inline long _pseudo_mm_bring_back(void *__user args)
 	if (err)
 		return err;
 	err = pseudo_mm_bring_back(param.id, param.start, param.size);
+	return err;
+}
+
+static inline long _pseudo_mm_pf_stat(void *__user args)
+{
+	struct pseudo_mm_pf_stat_param param;
+	unsigned long err;
+	struct mm_struct *mm;
+	struct task_struct *tsk;
+	err = copy_from_user(&param, args, sizeof(param));
+	if (err)
+		return err;
+	tsk = find_task_by_vpid(param.pid);
+	if (!tsk)
+		return -ESRCH;
+	mm = get_task_mm(tsk);
+	if (!mm)
+		return -ESRCH;
+	get_task_struct(tsk);
+	param.rdma_read_nr = atomic64_read(&mm->pseudo_mm_rdma_read_nr);
+	param.cow_nr = atomic64_read(&mm->pseudo_mm_cow_nr);
+	err = copy_to_user(args, &param, sizeof(param));
+	mmput(mm);
+	put_task_struct(tsk);
 	return err;
 }
 
@@ -153,6 +177,11 @@ static long pseudo_mm_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	case PSEUDO_MM_IOC_BRING_BACK:
 		err = _pseudo_mm_bring_back((void *)args);
+		if (err)
+			return err;
+		break;
+	case PSEUDO_MM_IOC_PF_STAT:
+		err = _pseudo_mm_pf_stat((void *)args);
 		if (err)
 			return err;
 		break;

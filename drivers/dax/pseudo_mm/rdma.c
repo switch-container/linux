@@ -194,7 +194,7 @@ static int pseudo_mm_rdma_addr_resolved(struct rdma_queue *q)
 
 	ret = rdma_resolve_route(q->cm_id, CONNECTION_TIMEOUT_MS);
 	if (ret) {
-		pr_err("rdma_resolve_route failed\n");
+		pr_err("rdma_resolve_route failed: %d\n", ret);
 		pseudo_mm_rdma_destroy_queue_ib(q);
 	}
 

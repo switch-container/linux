@@ -3205,6 +3205,13 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		if (!new_page)
 			goto oom;
 
+		if (vma_is_pseudo_mm(vma) && pte_devmap(vmf->orig_pte)) {
+			pr_info("pseudo_mm COW for page at VA %#lx, orig_pte: %#lx, new page pfn %#lx\n", vmf->address, vmf->orig_pte.pte, page_to_pfn(new_page));
+			atomic64_inc(&mm->pseudo_mm_cow_nr);
+			old_page = pfn_to_page(pte_pfn(vmf->orig_pte));
+			get_page(old_page);
+		}
+
 		if (!__wp_page_copy_user(new_page, old_page, vmf)) {
 			/*
 			 * COW failed, if the fault was solved by other,
@@ -3218,6 +3225,10 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 
 			delayacct_wpcopy_end();
 			return 0;
+		}
+		if (vma_is_pseudo_mm(vma) && pte_devmap(vmf->orig_pte) && old_page) {
+			put_page(old_page);
+			old_page = NULL;
 		}
 		kmsan_copy_page_meta(new_page, old_page);
 	}
@@ -4277,6 +4288,7 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 
 	__folio_set_locked(folio);
 	// read from rdma
+	atomic64_inc(&vm_mm->pseudo_mm_rdma_read_nr);
 	if (pseudo_mm_rdma_pf_handle(page, remote_page_offset)) {
 		ret = VM_FAULT_SIGBUS;
 		goto release_out;

@@ -35,6 +35,8 @@ TEST(rdma_and_file_mapping)
 	unsigned long *file_page_nums;
 	unsigned long *anon_pages_nums; // [anon page nums]
 	unsigned long *anon_starts;
+	unsigned long rdma_read_nr;
+	unsigned long total_anon_page_num = 0;
 	struct pseudo_mm_attach_param attach_param;
 
 	file_page_nums = calloc(file_num, sizeof(unsigned long));
@@ -100,6 +102,9 @@ TEST(rdma_and_file_mapping)
 		file_page_nums[i] = page_num;
 	}
 
+	for (int i = 0; i < anon_num; i++)
+		total_anon_page_num += anon_pages_nums[i];
+
 	// we attach multiple times
 	for (i = 0; i < 16; i++) {
 		pid = fork();
@@ -113,7 +118,9 @@ TEST(rdma_and_file_mapping)
 			ret = ioctl(fd, PSEUDO_MM_IOC_ATTACH,
 				    (void *)(&attach_param));
 			if (ret) {
-				printf(__FILE__ ":%d: child attach pseudo_mm failed\n", __LINE__);
+				printf(__FILE__
+				       ":%d: child attach pseudo_mm failed\n",
+				       __LINE__);
 				exit(EXIT_FAILURE);
 			}
 
@@ -126,7 +133,9 @@ TEST(rdma_and_file_mapping)
 					ret = check_page_content((void *)ptr,
 								 seed);
 					if (ret) {
-						printf(__FILE__ ":%d: check anon page content failed\n", __LINE__);
+						printf(__FILE__
+						       ":%d: check anon page content failed\n",
+						       __LINE__);
 						exit(EXIT_FAILURE);
 					}
 				}
@@ -150,12 +159,17 @@ TEST(rdma_and_file_mapping)
 					ptr += PAGE_SIZE;
 				}
 			}
+			ret = get_pseudo_mm_pf_stat(fd, getpid(), NULL,
+						    &rdma_read_nr);
+			ASSERT_EQ(ret, 0);
+			ASSERT_EQ(rdma_read_nr, total_anon_page_num);
 			exit(EXIT_SUCCESS);
 		} else {
 			int status;
 			ASSERT_EQ(waitpid(pid, &status, 0), pid);
-			if(WIFSIGNALED(status)) {
-				TH_LOG("child was terminated by signal: %d", WTERMSIG(status));
+			if (WIFSIGNALED(status)) {
+				TH_LOG("child was terminated by signal: %d",
+				       WTERMSIG(status));
 			}
 			ASSERT_TRUE(WIFEXITED(status));
 			ASSERT_EQ(WEXITSTATUS(status), 0);

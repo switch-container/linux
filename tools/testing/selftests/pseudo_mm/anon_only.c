@@ -112,6 +112,7 @@ TEST_F(single_page_anon, simple_attach)
 	pid_t pid;
 	const unsigned long start = 0xdead0UL << PAGE_SHIFT;
 	const unsigned long end = start + PAGE_SIZE;
+	unsigned long cow_nr, read_rdma_nr;
 	struct pseudo_mm_attach_param attach_param;
 
 	pid = getpid();
@@ -133,6 +134,10 @@ TEST_F(single_page_anon, simple_attach)
 	TH_LOG("attach succeed and start check anon page content");
 	ret = check_page_content((void *)start, self->seed);
 	ASSERT_EQ(ret, 0);
+	ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, &read_rdma_nr);
+	ASSERT_EQ(ret, 0);
+	ASSERT_EQ(cow_nr, 0);
+	ASSERT_EQ(read_rdma_nr, 0);
 
 	TH_LOG("succeed to attach pseudo_mm to current process and check its content.");
 }
@@ -355,6 +360,7 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 	char buf, *iter;
 	pid_t pid, curr_pid;
 	struct pseudo_mm_attach_param attach_param;
+	unsigned long cow_nr;
 	// SKIP(return, "");
 
 	ASSERT_EQ(pipe(ctp), 0);
@@ -389,6 +395,10 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 		ret = check_page_content((void *)self->start, self->seed);
 		if (ret)
 			exit(EXIT_FAILURE);
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, 0);
 		exit(EXIT_SUCCESS);
 	} else {
 		int status;
@@ -402,6 +412,10 @@ TEST_F(single_page_anon_multi_attach, one_writer_one_reader)
 			iter = (char *)(self->start + i);
 			*iter = 'X';
 		}
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, 1);
 		ASSERT_EQ(write(ptc[1], &buf, 1), 1);
 		close(ptc[1]);
 		ASSERT_EQ(waitpid(pid, &status, 0), pid);
@@ -452,6 +466,7 @@ TEST_F(multi_page, private_write_after_attach)
 	char *iter, pipe_buf;
 	void *addr;
 	struct pseudo_mm_attach_param attach_param;
+	unsigned long cow_nr;
 	// SKIP(return, "");
 
 	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
@@ -488,6 +503,10 @@ TEST_F(multi_page, private_write_after_attach)
 					(i << PAGE_SHIFT));
 			ret = check_page_content(addr, self->seed);
 		}
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, 0);
 		TH_LOG("child %d finish checking", curr_pid);
 		exit(EXIT_SUCCESS);
 	} else {
@@ -503,6 +522,10 @@ TEST_F(multi_page, private_write_after_attach)
 		TH_LOG("parent %d finish modifying", curr_pid);
 		ASSERT_EQ(write(ptc[1], &pipe_buf, 1), 1);
 		close(ptc[1]);
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, self->page_num);
 		// wait for child to exit
 		ASSERT_EQ(waitpid(pid, &status, 0), pid);
 		ASSERT_TRUE(WIFEXITED(status));
@@ -517,6 +540,7 @@ TEST_F(multi_page, private_attach_after_write)
 	char *iter, pipe_buf;
 	void *addr;
 	struct pseudo_mm_attach_param attach_param;
+	unsigned long cow_nr;
 	// SKIP(return, "");
 
 	ret = add_mmap_to(self->fd, self->pseudo_mm_id, self->start, self->end,
@@ -545,6 +569,10 @@ TEST_F(multi_page, private_attach_after_write)
 			ret = check_page_content(addr, self->seed);
 			ASSERT_EQ(ret, 0);
 		}
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, 0);
 		TH_LOG("child %d finish checking", getpid());
 		exit(EXIT_SUCCESS);
 	} else {
@@ -561,6 +589,10 @@ TEST_F(multi_page, private_attach_after_write)
 			*iter = 'X';
 		ASSERT_EQ(write(pipe_fd[1], &pipe_buf, 1), 1);
 		close(pipe_fd[1]);
+		ret = get_pseudo_mm_pf_stat(self->fd, getpid(), &cow_nr, NULL);
+		if (ret)
+			exit(EXIT_FAILURE);
+		ASSERT_EQ(cow_nr, self->page_num);
 		// wait for child to exit
 		ASSERT_EQ(waitpid(pid, &status, 0), pid);
 		ASSERT_TRUE(WIFEXITED(status));

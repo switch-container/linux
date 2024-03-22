@@ -47,6 +47,12 @@ struct pseudo_mm_attach_param {
 	int id;
 };
 
+struct pseudo_mm_pf_stat_param {
+	pid_t pid;
+	unsigned long cow_nr;
+	unsigned long rdma_read_nr;
+};
+
 /* argument is a fd used to identify the backend dax device */
 #define PSEUDO_MM_IOC_REGISTER _IOW(PSEUDO_MM_IOC_MAGIC, 0x00, int *)
 /* argument is used to RECV pseudo_mm_id */
@@ -61,5 +67,7 @@ struct pseudo_mm_attach_param {
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x05, struct pseudo_mm_attach_param *)
 #define PSEUDO_MM_IOC_BRING_BACK \
 	_IOW(PSEUDO_MM_IOC_MAGIC, 0x06, struct pseudo_mm_bring_back_param *)
+#define PSEUDO_MM_IOC_PF_STAT \
+	_IOWR(PSEUDO_MM_IOC_MAGIC, 0x07, struct pseudo_mm_pf_stat_param *)
 
 #endif

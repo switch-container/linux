@@ -137,7 +137,7 @@ int setup_anon_map_pt(int fd, int pseudo_mm_id, unsigned long start,
 }
 
 int setup_anon_map_pt_rdma(int fd, int pseudo_mm_id, unsigned long start,
-		      unsigned long size, unsigned long pgoff)
+			   unsigned long size, unsigned long pgoff)
 {
 	struct pseudo_mm_setup_pt_param param;
 	int ret;
@@ -155,7 +155,8 @@ int setup_anon_map_pt_rdma(int fd, int pseudo_mm_id, unsigned long start,
 	return ret;
 }
 
-int bring_back_map(int fd, int pseudo_mm_id, unsigned long start, unsigned long size)
+int bring_back_map(int fd, int pseudo_mm_id, unsigned long start,
+		   unsigned long size)
 {
 	struct pseudo_mm_bring_back_param param;
 	int ret;
@@ -165,6 +166,23 @@ int bring_back_map(int fd, int pseudo_mm_id, unsigned long start, unsigned long 
 	param.size = size;
 	ret = ioctl(fd, PSEUDO_MM_IOC_BRING_BACK, (void *)(&param));
 	return ret;
+}
+
+int get_pseudo_mm_pf_stat(int fd, pid_t pid, unsigned long *cow_nr,
+			  unsigned long *rdma_read_nr)
+{
+	struct pseudo_mm_pf_stat_param param;
+	int ret;
+
+	param.pid = pid;
+	ret = ioctl(fd, PSEUDO_MM_IOC_PF_STAT, (void *)(&param));
+	if (ret)
+		return ret;
+	if (cow_nr)
+		*cow_nr = param.cow_nr;
+	if (rdma_read_nr)
+		*rdma_read_nr = param.rdma_read_nr;
+	return 0;
 }
 
 unsigned long djb_hash(const char *cp)
