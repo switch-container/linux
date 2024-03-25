@@ -116,8 +116,10 @@ static inline long _pseudo_mm_pf_stat(void *__user args)
 	if (!mm)
 		return -ESRCH;
 	get_task_struct(tsk);
-	param.rdma_read_nr = atomic64_read(&mm->pseudo_mm_rdma_read_nr);
-	param.cow_nr = atomic64_read(&mm->pseudo_mm_cow_nr);
+	param.cow_nr = atomic_read(&mm->pseudo_mm_cow_nr);
+	param.fast_rdma_read_nr = atomic_read(&mm->pseudo_mm_fast_rdma_read_nr);
+	param.slow_rdma_read_nr = atomic_read(&mm->pseudo_mm_slow_rdma_read_nr);
+	param.rdma_read_nr = atomic_read(&mm->pseudo_mm_rdma_read_nr);
 	err = copy_to_user(args, &param, sizeof(param));
 	mmput(mm);
 	put_task_struct(tsk);

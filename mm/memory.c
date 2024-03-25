@@ -78,6 +78,7 @@
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
 #include <linux/pseudo_mm.h>
+#include <linux/sched/clock.h>
 
 #include <trace/events/kmem.h>
 
@@ -3188,11 +3189,19 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	pte_t entry;
 	int page_copied = 0;
 	struct mmu_notifier_range range;
+	u64 pseudo_mm_start = 0, pseudo_mm_end;
+	int is_pseudo_mm_dax_fault = 0;
 
 	delayacct_wpcopy_start();
 
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
+
+	is_pseudo_mm_dax_fault = vma_is_pseudo_mm(vma) && pte_devmap(vmf->orig_pte);
+#ifdef PSEUDO_MM_DEBUG
+	if (is_pseudo_mm_dax_fault)
+		pseudo_mm_start = local_clock();
+#endif
 
 	if (is_zero_pfn(pte_pfn(vmf->orig_pte))) {
 		new_page = alloc_zeroed_user_highpage_movable(vma,
@@ -3205,9 +3214,9 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		if (!new_page)
 			goto oom;
 
-		if (vma_is_pseudo_mm(vma) && pte_devmap(vmf->orig_pte)) {
-			pr_info("pseudo_mm COW for page at VA %#lx, orig_pte: %#lx, new page pfn %#lx\n", vmf->address, vmf->orig_pte.pte, page_to_pfn(new_page));
-			atomic64_inc(&mm->pseudo_mm_cow_nr);
+		if (is_pseudo_mm_dax_fault) {
+			// pr_info("pseudo_mm COW for page at VA %#lx, orig_pte: %#lx, new page pfn %#lx\n", vmf->address, vmf->orig_pte.pte, page_to_pfn(new_page));
+			atomic_inc(&mm->pseudo_mm_cow_nr);
 			old_page = pfn_to_page(pte_pfn(vmf->orig_pte));
 			get_page(old_page);
 		}
@@ -3226,7 +3235,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 			delayacct_wpcopy_end();
 			return 0;
 		}
-		if (vma_is_pseudo_mm(vma) && pte_devmap(vmf->orig_pte) && old_page) {
+		if (is_pseudo_mm_dax_fault && old_page) {
 			put_page(old_page);
 			old_page = NULL;
 		}
@@ -3336,6 +3345,12 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		put_page(old_page);
 	}
 
+#ifdef PSEUDO_MM_DEBUG
+	if (is_pseudo_mm_dax_fault) {
+		pseudo_mm_end = local_clock();
+		trace_printk("wp_page_copy for pseudo_mm spent %lld ns\n", pseudo_mm_end - pseudo_mm_start);
+	}
+#endif
 	delayacct_wpcopy_end();
 	return (page_copied && !unshare) ? VM_FAULT_WRITE : 0;
 oom_free_new:
@@ -4256,6 +4271,11 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 	struct folio *folio;
 	pgoff_t remote_page_offset;
 	pte_t pte;
+	u64 pseudo_mm_start, pseudo_mm_end;
+
+#ifdef PSEUDO_MM_DEBUG
+	pseudo_mm_start = local_clock();
+#endif
 
 	if (!pte_unmap_same(vmf))
 		goto out;
@@ -4288,7 +4308,7 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 
 	__folio_set_locked(folio);
 	// read from rdma
-	atomic64_inc(&vm_mm->pseudo_mm_rdma_read_nr);
+	atomic_inc(&vm_mm->pseudo_mm_rdma_read_nr);
 	if (pseudo_mm_rdma_pf_handle(page, remote_page_offset)) {
 		ret = VM_FAULT_SIGBUS;
 		goto release_out;
@@ -4348,6 +4368,11 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 	// NOTE: if succeed, do not put folio
 	folio_unlock(folio);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
+
+#ifdef PSEUDO_MM_DEBUG
+	pseudo_mm_end = local_clock();
+	trace_printk("do_pseudo_mm_rdma_page take %lld ns\n", pseudo_mm_end - pseudo_mm_start);
+#endif
 out:
 	return ret;
 nomap_out:

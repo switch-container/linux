@@ -49,8 +49,10 @@ struct pseudo_mm_attach_param {
 
 struct pseudo_mm_pf_stat_param {
 	pid_t pid;
-	unsigned long cow_nr;
-	unsigned long rdma_read_nr;
+	int cow_nr;
+	int slow_rdma_read_nr;
+	int fast_rdma_read_nr;
+	int rdma_read_nr;
 };
 
 /* argument is a fd used to identify the backend dax device */

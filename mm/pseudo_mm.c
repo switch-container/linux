@@ -389,6 +389,7 @@ static unsigned long pseudo_mm_attach_mmap(int id, struct pseudo_mm *pseudo_mm,
 			// setup a new sheme zero file when attach
 			// pr_info("pseudo_mm create new vma %p old vm_file's mapping = #%p",
 			// 	tmp, tmp->vm_file->f_mapping);
+			pr_warn("pseudo_mm create anon shared vma which is not well supported\n");
 			tmp->vm_file = NULL;
 			retval = shmem_zero_setup(tmp);
 			if (retval)

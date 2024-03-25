@@ -1135,8 +1135,10 @@ static struct mm_struct *mm_init_wo_task(struct mm_struct *mm)
 	mm->flags = default_dump_filter;
 	mm->def_flags = 0;
 
-	atomic64_set(&mm->pseudo_mm_cow_nr, 0);
-	atomic64_set(&mm->pseudo_mm_rdma_read_nr, 0);
+	atomic_set(&mm->pseudo_mm_cow_nr, 0);
+	atomic_set(&mm->pseudo_mm_fast_rdma_read_nr, 0);
+	atomic_set(&mm->pseudo_mm_slow_rdma_read_nr, 0);
+	atomic_set(&mm->pseudo_mm_rdma_read_nr, 0);
 
 	if (mm_alloc_pgd(mm))
 		goto fail_nopgd;

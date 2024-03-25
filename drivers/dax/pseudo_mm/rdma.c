@@ -672,38 +672,19 @@ static inline int begin_read(struct rdma_queue *q, struct page *page,
 int pseudo_mm_rdma_read_page(struct page *page, pgoff_t remote_pgoff)
 {
 	struct rdma_queue *q;
-	int ret, cpu;
+	struct mm_struct *mm = current->mm;
+	int ret;
 	u64 roffset = remote_pgoff << PAGE_SHIFT;
-	// struct __rdma_debug *debug_ptr;
-
-#ifdef PSEUDO_MM_DEBUG
-	static DEFINE_RATELIMIT_STATE(ratelimit, HZ, 5);
-	u64 start_ns = ktime_get_ns(), end_ns;
-	// u64 dur;
-#endif
-
+	u64 start, dur;
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(PageUptodate(page), page);
 
-	// local_bh_disable();
-	cpu = get_cpu();
-// #ifdef PSEUDO_MM_DEBUG
-// 	debug_ptr = this_cpu_ptr(&debug_info);
-// 	dur = start_ns - debug_ptr->last_ts;
-// 	if (dur >= 1000000000) {
-// 		pr_info("pseudo_mm_rdma_read_page on [CPU %d] in the past %lld ns called %lld times\n",
-// 			cpu, dur, debug_ptr->counter);
-// 		debug_ptr->last_ts = start_ns;
-// 		debug_ptr->counter = 0;
-// 	} else {
-// 		debug_ptr->counter++;
-// 	}
-// #endif
-	q = pseudo_mm_rdma_get_queue(cpu);
+	start = local_clock();
+	local_bh_disable();
+	q = pseudo_mm_rdma_get_queue(smp_processor_id());
 	ret = begin_read(q, page, roffset);
-	put_cpu();
-	// local_bh_enable();
+	local_bh_enable();
 	if (unlikely(ret)) {
 #ifdef PSEUDO_MM_DEBUG
 		pr_err("pseudo_mm_rdma begin_read() failed: %d\n", ret);
@@ -712,15 +693,12 @@ int pseudo_mm_rdma_read_page(struct page *page, pgoff_t remote_pgoff)
 	}
 	// Until now we only issue the rdma request
 	drain_queue(q);
+	dur = local_clock() - start;
+	if (dur >= 1000000UL) // 1ms
+		atomic_inc(&mm->pseudo_mm_slow_rdma_read_nr);
+	else if (dur <= 10000UL) // 10 us
+		atomic_inc(&mm->pseudo_mm_fast_rdma_read_nr);
 
-#ifdef PSEUDO_MM_DEBUG
-	end_ns = ktime_get_ns();
-	// print for more than 10ms duration
-	if (((end_ns - start_ns)) > 10000000UL && __ratelimit(&ratelimit))
-		pr_info("[pid: %d] read one remote page at %#lx took %lld ns\n",
-			task_pid_nr(current), remote_pgoff, end_ns - start_ns);
-
-#endif
 	return 0;
 }
 
