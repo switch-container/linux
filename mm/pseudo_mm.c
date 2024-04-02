@@ -29,6 +29,7 @@ DEFINE_XARRAY_ALLOC1(pseudo_mm_array);
 static struct kmem_cache *pseudo_mm_cachep;
 static struct pseudo_mm_backend backend;
 static pseudo_mm_rdma_pf_ops_t *pseudo_mm_rdma_pf_ops = NULL;
+static int __pseudo_mm_rdma_prefer_node = NUMA_NO_NODE;
 
 #define pseudo_mm_alloc() (kmem_cache_alloc(pseudo_mm_cachep, GFP_KERNEL))
 
@@ -79,7 +80,8 @@ int __init pseudo_mm_cache_init(void)
 }
 postcore_initcall(pseudo_mm_cache_init);
 
-unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op)
+unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op,
+						 int node)
 {
 	if (pseudo_mm_rdma_pf_ops != NULL) {
 		pr_err("only allowed to register one pseudo_mm_rdma_pf_handler, already set to %p!",
@@ -87,9 +89,22 @@ unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op)
 		return -EEXIST;
 	}
 	pseudo_mm_rdma_pf_ops = op;
+	if (node < 0 && node != NUMA_NO_NODE)
+		return -EINVAL;
+	if (!node_online(node)) {
+		pr_warn_once("node %d not online in %s\n", node, __FUNCTION__);
+		return -EINVAL;
+	}
+	__pseudo_mm_rdma_prefer_node = node;
 	return 0;
 }
 EXPORT_SYMBOL(register_pseudo_mm_rdma_pf_handler);
+
+inline int pseudo_mm_rdma_prefer_node(void)
+{
+	return __pseudo_mm_rdma_prefer_node;
+}
+EXPORT_SYMBOL(pseudo_mm_rdma_prefer_node);
 
 int pseudo_mm_rdma_pf_handle(struct page *page, pgoff_t remote_pgoff)
 {

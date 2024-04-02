@@ -4269,11 +4269,12 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 	pseudo_mm_rdma_entry_t entry;
 	struct page *page;
 	struct folio *folio;
+	int preferred_nid;
 	pgoff_t remote_page_offset;
 	pte_t pte;
-	u64 pseudo_mm_start, pseudo_mm_end;
 
 #ifdef PSEUDO_MM_DEBUG
+	u64 pseudo_mm_start, pseudo_mm_end;
 	pseudo_mm_start = local_clock();
 #endif
 
@@ -4293,12 +4294,15 @@ static vm_fault_t do_pseudo_mm_rdma_page(struct vm_fault *vmf)
 	}
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
+	preferred_nid = pseudo_mm_rdma_prefer_node();
 	// TODO(huang-jl): movable or not ?
-	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vmf->address, false);
-	if (!folio)
+	page = alloc_pages_node(preferred_nid, GFP_HIGHUSER_MOVABLE, 0);
+	// folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vmf->address, false);
+	if (!page)
 		goto oom;
+	folio = page_folio(page);
 
-	page = &folio->page;
+	// page = &folio->page;
 	if (mem_cgroup_charge(folio, vma->vm_mm, GFP_KERNEL))
 		goto release_out;
 	cgroup_throttle_swaprate(page, GFP_KERNEL);

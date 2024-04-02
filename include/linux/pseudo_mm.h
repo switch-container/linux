@@ -6,7 +6,7 @@
 #include <linux/xarray.h>
 #include <linux/rmap.h>
 
-#define PSEUDO_MM_DEBUG
+// #define PSEUDO_MM_DEBUG
 
 typedef struct {
 	unsigned long val;
@@ -51,10 +51,17 @@ typedef int (pseudo_mm_rdma_pf_ops_t)(struct page *page, pgoff_t rpgoff);
 unsigned long register_backend_dax_device(int fd);
 inline struct pseudo_mm_backend *pseudo_mm_get_backend(void);
 
-/* return 0 if succeed */
-unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op);
+/*
+ * Register page fault handler for rdma-backed pages in pseudo_mm
+ * @ op: the rdma read function, which read from remote `offset` into `page`.
+ * @ node: the node to alloc pages for rdma-backed pseudo_mm.
+ *
+ * return 0 if succeed
+ */
+unsigned long register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_pf_ops_t *op, int node);
 bool pseudo_mm_rdma_pf_handler_enable(void);
 pseudo_mm_rdma_pf_ops_t pseudo_mm_rdma_pf_handle;
+int pseudo_mm_rdma_prefer_node(void);
 
 /*
  * create_pseudo_mm() - create and init the pseudo_mm

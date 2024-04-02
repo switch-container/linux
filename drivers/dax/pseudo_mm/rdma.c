@@ -13,6 +13,7 @@ static struct pseudo_mm_rdma_ctrl *gctrl;
 static int serverport;
 static int numqueues;
 static int numcpus;
+static int prefer_numa_node;
 static char serverip[INET_ADDRSTRLEN];
 static char clientip[INET_ADDRSTRLEN];
 static struct kmem_cache *req_cache;
@@ -28,6 +29,7 @@ static struct kmem_cache *req_cache;
 module_param_named(sport, serverport, int, 0644);
 module_param_string(sip, serverip, INET_ADDRSTRLEN, 0644);
 module_param_string(cip, clientip, INET_ADDRSTRLEN, 0644);
+module_param_named(node, prefer_numa_node, int, 0644);
 
 // TODO: destroy ctrl
 
@@ -774,14 +776,16 @@ static int __init pseudo_mm_rdma_init_module(void)
 		return -ENODEV;
 	}
 
-	ret = register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_read_page);
+	ret = register_pseudo_mm_rdma_pf_handler(pseudo_mm_rdma_read_page,
+						 prefer_numa_node);
 	if (ret) {
 		pr_err("could not register pseudo_mm_rdma_pf_handler: %d\n",
 		       ret);
 		ib_unregister_client(&pseudo_mm_rdma_ib_client);
 		return ret;
 	}
-	pr_info("ctrl is ready for reqs\n");
+	pr_info("ctrl is ready for reqs cpu, queue num %d, rdma pf prefer numa %d\n",
+		numqueues, pseudo_mm_rdma_prefer_node());
 	return 0;
 }
 
